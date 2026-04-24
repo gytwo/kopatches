@@ -9,15 +9,15 @@
 
 #### 安装教程
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+1.  下载_lua文件，直接放到koreader/patches文件夹下
 
 #### 使用说明
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+1.  2-reader-covermode
+![cover](cover.jpg)
+![uncover](uncover.jpg)
+
+2.  2-visual-covergenerator-v2
 
 #### 参与贡献
 
