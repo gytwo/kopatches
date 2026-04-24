@@ -71,18 +71,14 @@ local function patchCoverMode()
             local x, y, w, h = rect.x, rect.y, rect.w, rect.h
             
             if is_covered then
-                if color then
-                    bb:paintRectRGB32(x, y, w, h, color)
-                else
-                    local yellow = Blitbuffer.colorFromName("yellow")
-                    if yellow then
-                        bb:paintRectRGB32(x, y, w, h, yellow)
-                    else
-                        bb:paintRect(x, y, w, h, Blitbuffer.COLOR_BLACK)
-                    end
-                end
+                -- 遮盖：完全不透明
+                local c = Blitbuffer.ColorRGB32(color.r, color.g, color.b, 0xFF)
+                bb:blendRectRGB32(x, y, w, h, c)
             else
-                bb:darkenRect(x, y, w, h, self.highlight.lighten_factor)
+                -- 未遮盖：半透明
+                local alpha = 0xFF * self.highlight.lighten_factor
+                local c = Blitbuffer.ColorRGB32(color.r, color.g, color.b, alpha)
+                bb:blendRectRGB32(x, y, w, h, c)
             end
             return
         end
