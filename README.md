@@ -21,15 +21,22 @@
 
 2.  2-visual-covergenerator-v2
 
-#### 设置
+#### 使用说明
 
 1.  2-reader-covermode
+
+- 全部遮盖：点击勾选即可批量遮盖所有可遮盖样式的标注，取消勾选则批量揭开所有遮盖，还原原本样式。（可设置快捷手势：阅读器-cover all/uncover all）
+- 单个遮盖-切换模式：默认双击可以切换单个标注的遮盖状态（但有些人可能设置了禁用双击，需要取消禁用双击才能实现切换）。可以更改为单击切换，但是单击标注本身会弹出koreader原始菜单，会有一些干扰，不介意这点干扰的话可以开启单击切换。
+- 可遮盖样式：默认为高亮（即仅高亮应用遮盖模式），可更改，也可同时选择多个样式
+- PS：遮盖模式仅对当前打开的书籍有效，不会影响原本的标注数据，关闭书籍后重新打开，仍旧是原本样式（即非遮盖模式）
+
 ![covermode-设置入口](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A3.png)
 ![covermode-设置入口2](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A32.png)
 ![covermode-设置入口3](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A33.png)
 ![covermode-设置入口4](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A34.png)
 
 2.  2-visual-covergenerator-v2
+
 
 #### 参与贡献
 
