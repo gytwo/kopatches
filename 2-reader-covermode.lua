@@ -1,5 +1,5 @@
 --[[
-Patch: Cover Mode - 点击高亮自动切换遮盖 + 手势批量操作
+Patch: Cover Mode - 支持双击/单击切换模式 + 样式选择
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -35,6 +35,47 @@ local function forceRedraw(ui)
     UIManager:setDirty(nil, "full")
 end
 
+-- 总开关
+local function isEnabled()
+    return G_reader_settings:readSetting("cover_mode_enabled", true)
+end
+
+-- 实时获取当前模式
+local function isDoubleTapMode()
+    return G_reader_settings:readSetting("cover_mode_double_tap", true)
+end
+
+-- 获取需要遮盖的样式列表
+local function getCoveredDrawers()
+    local covered_drawers = G_reader_settings:readSetting("cover_mode_drawers", {lighten = true})
+    return covered_drawers
+end
+
+-- 检查某个样式是否需要遮盖
+local function shouldCoverDrawer(drawer)
+    if not isEnabled() then
+        return false
+    end
+    local covered = getCoveredDrawers()
+    return covered[drawer] == true
+end
+
+local function toggleHighlight(highlight, index)
+    if not isEnabled() then
+        return
+    end
+    highlight._temp_covered = highlight._temp_covered or {}
+    local is_covered = highlight._temp_covered[index] == true
+    highlight._temp_covered[index] = not is_covered
+    
+    local ReaderUI = require("apps/reader/readerui")
+    if ReaderUI and ReaderUI.instance then
+        forceRedraw(ReaderUI.instance)
+    else
+        UIManager:setDirty(nil, "full")
+    end
+end
+
 local function patchCoverMode()
     logger.info("[CoverMode] 安装补丁...")
     
@@ -47,12 +88,12 @@ local function patchCoverMode()
     end
     
     -- ============================================================
-    -- 1. 修改绘制函数
+    -- 1. 修改绘制函数 - 支持多种样式
     -- ============================================================
     local original_draw = ReaderView.drawHighlightRect
     
     function ReaderView.drawHighlightRect(self, bb, _x, _y, rect, drawer, color, draw_note_mark)
-        if drawer == "lighten" then
+        if shouldCoverDrawer(drawer) then
             local index = nil
             if self.highlight.visible_boxes then
                 for _, box in ipairs(self.highlight.visible_boxes) do
@@ -71,16 +112,20 @@ local function patchCoverMode()
             local x, y, w, h = rect.x, rect.y, rect.w, rect.h
             
             if is_covered then
-                -- 遮盖：完全不透明
-                local c = Blitbuffer.ColorRGB32(color.r, color.g, color.b, 0xFF)
-                bb:blendRectRGB32(x, y, w, h, c)
-            else
-                -- 未遮盖：半透明
-                local alpha = 0xFF * self.highlight.lighten_factor
-                local c = Blitbuffer.ColorRGB32(color.r, color.g, color.b, alpha)
-                bb:blendRectRGB32(x, y, w, h, c)
+                if color then
+                    local c = Blitbuffer.ColorRGB32(color.r, color.g, color.b, 0xFF)
+                    bb:blendRectRGB32(x, y, w, h, c)
+                else
+                    local yellow = Blitbuffer.colorFromName("yellow")
+                    if yellow then
+                        local c = Blitbuffer.ColorRGB32(yellow.r, yellow.g, yellow.b, 0xFF)
+                        bb:blendRectRGB32(x, y, w, h, c)
+                    else
+                        bb:darkenRect(x, y, w, h, 1)
+                    end
+                end
+                return
             end
-            return
         end
         
         if original_draw then
@@ -89,11 +134,79 @@ local function patchCoverMode()
     end
     
     -- ============================================================
-    -- 2. Hook onTap：点击高亮时自动切换遮盖状态
+    -- 2. 注册双击手势
+    -- ============================================================
+    local original_reader_ready = ReaderHighlight.onReaderReady
+    
+    function ReaderHighlight:onReaderReady()
+        if original_reader_ready then
+            original_reader_ready(self)
+        end
+        
+        self.ui:registerTouchZones({
+            {
+                id = "readerhighlight_double_tap",
+                ges = "double_tap",
+                screen_zone = {
+                    ratio_x = 0, ratio_y = 0,
+                    ratio_w = 1, ratio_h = 1,
+                },
+                handler = function(ges)
+                    if not isEnabled() or not isDoubleTapMode() then
+                        return false
+                    end
+                    return self:onDoubleTap(ges)
+                end,
+                overrides = {
+                    "readerhighlight_tap",
+                    "readerhighlight_hold",
+                },
+            },
+        })
+        logger.info("[CoverMode] 双击手势已注册")
+    end
+    
+    function ReaderHighlight:onDoubleTap(ges)
+        if not isEnabled() or not isDoubleTapMode() then
+            return false
+        end
+        
+        logger.info("[CoverMode] 双击触发")
+        
+        local pos = self.view:screenToPageTransform(ges.pos)
+        if not pos then
+            return false
+        end
+        
+        local tapped_index = nil
+        if self.view.highlight.visible_boxes then
+            for _, box in ipairs(self.view.highlight.visible_boxes) do
+                if inside_box(pos, box.rect) then
+                    tapped_index = box.index
+                    break
+                end
+            end
+        end
+        
+        if tapped_index then
+            logger.info("[CoverMode] 双击高亮切换, idx=", tapped_index)
+            toggleHighlight(self, tapped_index)
+            return true
+        end
+        
+        return false
+    end
+    
+    -- ============================================================
+    -- 3. Hook onTap
     -- ============================================================
     local original_onTap = ReaderHighlight.onTap
     
     function ReaderHighlight:onTap(_, ges)
+        if not isEnabled() or isDoubleTapMode() then
+            return original_onTap(self, _, ges)
+        end
+        
         local pos = self.view:screenToPageTransform(ges.pos)
         
         local tapped_index = nil
@@ -107,25 +220,20 @@ local function patchCoverMode()
         end
         
         if tapped_index then
-            self._temp_covered = self._temp_covered or {}
-            local is_covered = self._temp_covered[tapped_index] == true
-            self._temp_covered[tapped_index] = not is_covered
-            
-            local ReaderUI = require("apps/reader/readerui")
-            if ReaderUI and ReaderUI.instance then
-                forceRedraw(ReaderUI.instance)
-            else
-                UIManager:setDirty(nil, "full")
-            end
+            logger.info("[CoverMode] 单击高亮切换, idx=", tapped_index)
+            toggleHighlight(self, tapped_index)
         end
         
         return original_onTap(self, _, ges)
     end
     
     -- ============================================================
-    -- 3. 批量操作函数
+    -- 4. 批量操作函数
     -- ============================================================
     local function coverAllHighlights(highlight)
+        if not isEnabled() then
+            return
+        end
         highlight._temp_covered = highlight._temp_covered or {}
         local annotations = highlight.ui.annotation.annotations
         for idx, item in ipairs(annotations) do
@@ -136,6 +244,9 @@ local function patchCoverMode()
     end
     
     local function uncoverAllHighlights(highlight)
+        if not isEnabled() then
+            return
+        end
         highlight._temp_covered = highlight._temp_covered or {}
         local annotations = highlight.ui.annotation.annotations
         for idx, item in ipairs(annotations) do
@@ -146,9 +257,12 @@ local function patchCoverMode()
     end
     
     -- ============================================================
-    -- 4. 手势处理函数
+    -- 5. 手势处理函数
     -- ============================================================
     function ReaderUI:onToggleCoverMode()
+        if not isEnabled() then
+            return
+        end
         local highlight = self.highlight
         if not highlight then
             return
@@ -176,7 +290,7 @@ local function patchCoverMode()
     end
     
     -- ============================================================
-    -- 5. 注册 Dispatcher 手势动作
+    -- 6. 注册 Dispatcher 手势动作
     -- ============================================================
     Dispatcher:registerAction("toggle_cover_mode_action", {
         category = "none",
@@ -187,7 +301,47 @@ local function patchCoverMode()
     })
     
     -- ============================================================
-    -- 6. 主菜单（Cover mode 勾选框）
+    -- 7. 样式选项（中文）
+    -- ============================================================
+    local drawer_names = {
+        lighten = _("文本高亮"),
+        underscore = _("下划线"),
+        strikeout = _("删除线"),
+        invert = _("反色"),
+    }
+    
+    local function buildDrawerSettingsMenu()
+        local items = {}
+        local covered = getCoveredDrawers()
+        local enabled = isEnabled()
+        
+        for drawer, name in pairs(drawer_names) do
+            table.insert(items, {
+                text = name,
+                enabled_func = function() return enabled end,
+                checked_func = function()
+                    return covered[drawer] == true
+                end,
+                callback = function(touchmenu_instance)
+                    local new_value = not covered[drawer]
+                    covered[drawer] = new_value
+                    G_reader_settings:saveSetting("cover_mode_drawers", covered)
+                    local ReaderUI = require("apps/reader/readerui")
+                    if ReaderUI and ReaderUI.instance then
+                        forceRedraw(ReaderUI.instance)
+                    end
+                    if touchmenu_instance then
+                        touchmenu_instance:updateItems()
+                    end
+                end,
+            })
+        end
+        
+        return items
+    end
+    
+    -- ============================================================
+    -- 8. 主菜单（中文）
     -- ============================================================
     local function addToMainMenu(menu_items)
         if menu_items.cover_mode then
@@ -195,49 +349,132 @@ local function patchCoverMode()
         end
         
         menu_items.cover_mode = {
-            text = _("Cover mode"),
+            text = _("遮盖模式"),
             sorting_hint = "typeset",
-            checked_func = function()
-                local ReaderUI = require("apps/reader/readerui")
-                if not ReaderUI or not ReaderUI.instance then
-                    return false
-                end
-                local highlight = ReaderUI.instance.highlight
-                if not highlight or not highlight._temp_covered then
-                    return false
-                end
-                local annotations = highlight.ui.annotation.annotations
-                for idx, item in ipairs(annotations) do
-                    if item.drawer and highlight._temp_covered[idx] then
-                        return true
-                    end
-                end
-                return false
-            end,
-            callback = function()
-                local ReaderUI = require("apps/reader/readerui")
-                if not ReaderUI or not ReaderUI.instance then
-                    return
-                end
-                local highlight = ReaderUI.instance.highlight
-                if not highlight then
-                    return
-                end
-                local has_covered = false
-                local annotations = highlight.ui.annotation.annotations
-                for idx, item in ipairs(annotations) do
-                    if item.drawer and highlight._temp_covered and highlight._temp_covered[idx] then
-                        has_covered = true
-                        break
-                    end
-                end
-                if has_covered then
-                    uncoverAllHighlights(highlight)
-                else
-                    coverAllHighlights(highlight)
-                end
-                forceRedraw(ReaderUI.instance)
-            end,
+            sub_item_table = {
+                {
+                    text = _("启用遮盖"),
+                    checked_func = function()
+                        return isEnabled()
+                    end,
+                    callback = function(touchmenu_instance)
+                        local new_value = not isEnabled()
+                        G_reader_settings:saveSetting("cover_mode_enabled", new_value)
+                        logger.info("[CoverMode] 启用遮盖:", new_value)
+                        local Notification = require("ui/widget/notification")
+                        if new_value then
+                            Notification:notify(_("遮盖模式已启用"))
+                        else
+                            Notification:notify(_("遮盖模式已禁用"))
+                        end
+                        -- 刷新整个界面
+                        local ReaderUI = require("apps/reader/readerui")
+                        if ReaderUI and ReaderUI.instance then
+                            forceRedraw(ReaderUI.instance)
+                        end
+                        if touchmenu_instance then
+                            touchmenu_instance:updateItems()
+                        end
+                    end,
+                },
+                {
+                    text = _("全部遮盖"),
+                    enabled_func = function()
+                        return isEnabled()
+                    end,
+                    checked_func = function()
+                        local ReaderUI = require("apps/reader/readerui")
+                        if not ReaderUI or not ReaderUI.instance then
+                            return false
+                        end
+                        local highlight = ReaderUI.instance.highlight
+                        if not highlight or not highlight._temp_covered then
+                            return false
+                        end
+                        local annotations = highlight.ui.annotation.annotations
+                        for idx, item in ipairs(annotations) do
+                            if item.drawer and highlight._temp_covered[idx] then
+                                return true
+                            end
+                        end
+                        return false
+                    end,
+                    callback = function(touchmenu_instance)
+                        local ReaderUI = require("apps/reader/readerui")
+                        if not ReaderUI or not ReaderUI.instance then
+                            return
+                        end
+                        local highlight = ReaderUI.instance.highlight
+                        if not highlight then
+                            return
+                        end
+                        local has_covered = false
+                        local annotations = highlight.ui.annotation.annotations
+                        for idx, item in ipairs(annotations) do
+                            if item.drawer and highlight._temp_covered and highlight._temp_covered[idx] then
+                                has_covered = true
+                                break
+                            end
+                        end
+                        if has_covered then
+                            uncoverAllHighlights(highlight)
+                        else
+                            coverAllHighlights(highlight)
+                        end
+                        forceRedraw(ReaderUI.instance)
+                        if touchmenu_instance then
+                            touchmenu_instance:updateItems()
+                        end
+                    end,
+                },
+                {
+                    text = _("切换模式"),
+                    enabled_func = function()
+                        return isEnabled()
+                    end,
+                    sub_item_table = {
+                        {
+                            text = _("双击切换（请确保已在[设置]-[手势]中取消禁用双击）"),
+                            checked_func = function()
+                                return isDoubleTapMode() == true
+                            end,
+                            callback = function(touchmenu_instance)
+                                if not isDoubleTapMode() then
+                                    G_reader_settings:saveSetting("cover_mode_double_tap", true)
+                                    local Notification = require("ui/widget/notification")
+                                    Notification:notify(_("遮盖模式：双击切换"))
+                                    if touchmenu_instance then
+                                        touchmenu_instance:updateItems()
+                                    end
+                                end
+                            end,
+                        },
+                        {
+                            text = _("单击切换"),
+                            checked_func = function()
+                                return isDoubleTapMode() == false
+                            end,
+                            callback = function(touchmenu_instance)
+                                if isDoubleTapMode() then
+                                    G_reader_settings:saveSetting("cover_mode_double_tap", false)
+                                    local Notification = require("ui/widget/notification")
+                                    Notification:notify(_("遮盖模式：单击切换"))
+                                    if touchmenu_instance then
+                                        touchmenu_instance:updateItems()
+                                    end
+                                end
+                            end,
+                        },
+                    },
+                },
+                {
+                    text = _("可遮盖样式"),
+                    enabled_func = function()
+                        return isEnabled()
+                    end,
+                    sub_item_table = buildDrawerSettingsMenu(),
+                },
+            },
         }
     end
     
