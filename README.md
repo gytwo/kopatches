@@ -11,11 +11,23 @@
 
 1.  下载_lua文件，直接放到koreader/patches文件夹下
 
-#### 使用说明
+#### 效果
 
 1.  2-reader-covermode
-![cover](cover.jpg)
-![uncover](uncover.jpg)
+![cover-墨水屏](picture/cover-%E5%A2%A8%E6%B0%B4%E5%B1%8F.png)
+![uncover-墨水屏](picture/uncover-%E5%A2%A8%E6%B0%B4%E5%B1%8F.png)
+![cover-安卓手机](picture/cover-%E5%AE%89%E5%8D%93%E6%89%8B%E6%9C%BA.jpg)
+![uncover-安卓手机](picture/uncover-%E5%AE%89%E5%8D%93%E6%89%8B%E6%9C%BA.jpg)
+
+2.  2-visual-covergenerator-v2
+
+#### 设置
+
+1.  2-reader-covermode
+![covermode-设置入口](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A3.png)
+![covermode-设置入口2](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A32.png)
+![covermode-设置入口3](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A33.png)
+![covermode-设置入口4](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A34.png)
 
 2.  2-visual-covergenerator-v2
 
