@@ -1,10 +1,10 @@
 # kopatches
 
-#### 介绍
-适用于koreader的一些小补丁
-遮盖模式：2-reader-covermode  为标注（高亮、下划线、删除线、反色）添加遮盖模式以供复习
-封面生成器：2-visual-covergenerator-v2  
+#### 介绍：适用于koreader的一些小补丁
 
+- 遮盖模式：2-reader-covermode  为标注（高亮、下划线、删除线、反色）添加遮盖模式以供复习
+- 封面生成器：2-visual-covergenerator-v2  在文件没有封面时自动生成类似calibre风格的简单封面（基于书籍标题及作者信息）
+- 
 #### 安装教程
 
 1.  下载_lua文件，直接放到koreader/patches文件夹下
