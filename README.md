@@ -20,7 +20,7 @@
 ![PDF-全部揭开](picture/遮盖模式-PDF-全部揭开.png)
 ![PDF-切换单个遮盖](picture/遮盖模式-PDF-切换单个遮盖.png)
 
-3.  2-visual-covergenerator-v2
+2.  2-visual-covergenerator-v2
 
 #### 使用说明
 
@@ -37,7 +37,17 @@
 ![covermode-设置入口4](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A34.png)
 
 2.  2-visual-covergenerator-v2
+   
+#### 更新说明
 
+1.  2-reader-covermode（V2）
+
+- 修复在PDF中切换遮盖无反应（匹配不到index）的问题
+- 修复切换书籍时菜单丢失的问题（取消只注册一次的限制）
+- 修复PDF连续视图模式下部分标注无法遮盖的问题（通过 getScrollPagePosition 获取正确页码）
+- 提示：PDF分页视图模式下由于PDF物理页码与实际屏幕页码不一致，会存在双击跳转回物理页码第一部分所在屏幕页码的问题，推荐使用PDF连续视图模式或者改用单击切换遮盖
+
+2.  2-visual-covergenerator-v2
 
 #### 参与贡献
 
