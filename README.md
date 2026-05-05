@@ -16,8 +16,11 @@
 ![uncover-墨水屏](picture/uncover-%E5%A2%A8%E6%B0%B4%E5%B1%8F.png)
 ![cover-安卓手机](picture/cover-%E5%AE%89%E5%8D%93%E6%89%8B%E6%9C%BA.jpg)
 ![uncover-安卓手机](picture/uncover-%E5%AE%89%E5%8D%93%E6%89%8B%E6%9C%BA.jpg)
+![PDF-全部遮盖](picture/遮盖模式-PDF-全部遮盖.png)
+![PDF-全部揭开](picture/遮盖模式-PDF-全部揭开.png)
+![PDF-切换单个遮盖](picture/遮盖模式-PDF-切换单个遮盖.png)
 
-2.  2-visual-covergenerator-v2
+3.  2-visual-covergenerator-v2
 
 #### 使用说明
 
