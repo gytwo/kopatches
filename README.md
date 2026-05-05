@@ -31,10 +31,10 @@
 - 可遮盖样式：默认为高亮（即仅高亮应用遮盖模式），可更改，也可同时选择多个样式
 - PS：遮盖模式仅对当前打开的书籍有效，不会影响原本的标注数据，关闭书籍后重新打开，仍旧是原本样式（即非遮盖模式）
 
-![covermode-设置入口](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A3.png)
-![covermode-设置入口2](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A32.png)
-![covermode-设置入口3](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A33.png)
-![covermode-设置入口4](picture/covermode-%E8%AE%BE%E7%BD%AE%E5%85%A5%E5%8F%A34.png)
+![covermode-设置入口](picture/遮盖模式-菜单-入口.png)
+![covermode-设置入口2](picture/遮盖模式-菜单-主菜单.png)
+![covermode-设置入口3](picture/遮盖模式-菜单-单个遮盖切换模式.png)
+![covermode-设置入口4](picture/遮盖模式-菜单-可遮盖样式.png)
 
 2.  2-visual-covergenerator-v2
    
