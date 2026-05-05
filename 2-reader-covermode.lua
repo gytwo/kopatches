@@ -1,5 +1,12 @@
 --[[
-Patch: Cover Mode - 支持双击/单击切换模式 + 样式选择
+Patch: Cover Mode - 为标注（高亮、下划线、删除线、反色）添加遮盖模式以供复习
+作者：gytwo
+版本号：V2
+更新内容：
+（1）修复在PDF中切换遮盖无反应（匹配不到index）的问题
+（2）修复切换书籍时菜单丢失的问题（取消只注册一次的限制）
+（3）修复PDF连续视图模式下部分标注无法遮盖的问题（通过 getScrollPagePosition 获取正确页码）
+提示：PDF分页视图模式下由于PDF物理页码与实际屏幕页码不一致，会存在双击跳转回物理页码第一部分所在屏幕页码的问题，推荐使用PDF连续视图模式。
 ]]
 
 local Blitbuffer = require("ffi/blitbuffer")
@@ -33,6 +40,29 @@ local function forceRedraw(ui)
     end
     ui:handleEvent(Event:new("RedrawCurrentView"))
     UIManager:setDirty(nil, "full")
+end
+
+-- 获取 rect 所属的实际页码（连续模式专用）
+local function getPageFromScreenRect(self, rect)
+    -- 分页模式：直接用 self.state.page
+    if not self.page_states then
+        return self.state and self.state.page or 1
+    end
+    
+    -- 连续模式：通过 Y 坐标查找所属页面
+    local y = rect.y
+    local y_offset = 0
+    local gap = (self.page_gap and self.page_gap.height) or 0
+    
+    for _, state in ipairs(self.page_states) do
+        if y >= y_offset and y < y_offset + state.visible_area.h then
+            return state.page
+        end
+        y_offset = y_offset + state.visible_area.h + gap
+    end
+    
+    -- 没找到，返回第一页
+    return self.page_states[1] and self.page_states[1].page or 1
 end
 
 -- 总开关
@@ -76,6 +106,9 @@ local function toggleHighlight(highlight, index)
     end
 end
 
+-- 绘制函数是否已安装的标志
+local drawer_patched = false
+
 local function patchCoverMode()
     logger.info("[CoverMode] 安装补丁...")
     
@@ -83,96 +116,118 @@ local function patchCoverMode()
     local ReaderView = require("apps/reader/modules/readerview")
     local ReaderUI = require("apps/reader/readerui")
     
-    if not ReaderView or ReaderView._cover_patched then
+    if not ReaderView then
+        logger.warn("[CoverMode] ReaderView 未找到")
         return
     end
     
     -- ============================================================
-    -- 1. 修改绘制函数 - 支持多种样式
+    -- 1. 修改绘制函数 - 支持多种样式 + PDF 兼容（只执行一次）
     -- ============================================================
-    local original_draw = ReaderView.drawHighlightRect
-    
-    function ReaderView.drawHighlightRect(self, bb, _x, _y, rect, drawer, color, draw_note_mark)
-        if shouldCoverDrawer(drawer) then
-            local index = nil
-            if self.highlight.visible_boxes then
-                for _, box in ipairs(self.highlight.visible_boxes) do
-                    if box.rect == rect then
-                        index = box.index
-                        break
+    if not drawer_patched then
+        local original_draw = ReaderView.drawHighlightRect
+        
+        function ReaderView.drawHighlightRect(self, bb, _x, _y, rect, drawer, color, draw_note_mark)
+            if shouldCoverDrawer(drawer) then
+                local index = nil
+                -- 方法1：直接对象引用匹配（EPUB 有效）
+                if self.highlight.visible_boxes then
+                    for _, box in ipairs(self.highlight.visible_boxes) do
+                        if box.rect == rect then
+                            index = box.index
+                            break
+                        end
                     end
                 end
-            end
-            
-            local is_covered = false
-            if index and self.ui and self.ui.highlight and self.ui.highlight._temp_covered then
-                is_covered = self.ui.highlight._temp_covered[index] == true
-            end
-            
-            local x, y, w, h = rect.x, rect.y, rect.w, rect.h
-            
-            if is_covered then
-                if color then
-                    local c = Blitbuffer.ColorRGB32(color.r, color.g, color.b, 0xFF)
-                    bb:blendRectRGB32(x, y, w, h, c)
-                else
-                    local yellow = Blitbuffer.colorFromName("yellow")
-                    if yellow then
-                        local c = Blitbuffer.ColorRGB32(yellow.r, yellow.g, yellow.b, 0xFF)
+                
+                -- 方法2：坐标转换匹配（PDF 需要，因为 visible_boxes 存的是页面坐标）
+                if index == nil and self.highlight.visible_boxes then
+                    -- 获取 rect 所属的实际页码（修复连续模式问题）
+                    local current_page = getPageFromScreenRect(self, rect)
+                    for _, box in ipairs(self.highlight.visible_boxes) do
+                        local screen_rect = self:pageToScreenTransform(current_page, box.rect)
+                        if screen_rect and math.abs(screen_rect.x - rect.x) < 2 and math.abs(screen_rect.y - rect.y) < 2 then
+                            index = box.index
+                            break
+                        end
+                    end
+                end
+                
+                local is_covered = false
+                if index and self.ui and self.ui.highlight and self.ui.highlight._temp_covered then
+                    is_covered = self.ui.highlight._temp_covered[index] == true
+                end
+                
+                local x, y, w, h = rect.x, rect.y, rect.w, rect.h
+                
+                if is_covered then
+                    if color then
+                        local c = Blitbuffer.ColorRGB32(color.r, color.g, color.b, 0xFF)
                         bb:blendRectRGB32(x, y, w, h, c)
                     else
-                        bb:darkenRect(x, y, w, h, 1)
+                        local yellow = Blitbuffer.colorFromName("yellow")
+                        if yellow then
+                            local c = Blitbuffer.ColorRGB32(yellow.r, yellow.g, yellow.b, 0xFF)
+                            bb:blendRectRGB32(x, y, w, h, c)
+                        else
+                            bb:darkenRect(x, y, w, h, 1)
+                        end
                     end
+                    return
                 end
-                return
+            end
+            
+            if original_draw then
+                original_draw(self, bb, _x, _y, rect, drawer, color, draw_note_mark)
             end
         end
         
-        if original_draw then
-            original_draw(self, bb, _x, _y, rect, drawer, color, draw_note_mark)
-        end
+        drawer_patched = true
+        logger.info("[CoverMode] 绘制函数已安装")
     end
     
     -- ============================================================
-    -- 2. 注册双击手势
+    -- 2. 注册双击手势（每次打开都确保已注册）
     -- ============================================================
     local original_reader_ready = ReaderHighlight.onReaderReady
+    local doubletap_registered = false
     
     function ReaderHighlight:onReaderReady()
         if original_reader_ready then
             original_reader_ready(self)
         end
-        
-        self.ui:registerTouchZones({
-            {
-                id = "readerhighlight_double_tap",
-                ges = "double_tap",
-                screen_zone = {
-                    ratio_x = 0, ratio_y = 0,
-                    ratio_w = 1, ratio_h = 1,
+
+        if not doubletap_registered then
+            self.ui:registerTouchZones({
+                {
+                    id = "readerhighlight_double_tap",
+                    ges = "double_tap",
+                    screen_zone = {
+                        ratio_x = 0, ratio_y = 0,
+                        ratio_w = 1, ratio_h = 1,
+                    },
+                    handler = function(ges)
+                        if not isEnabled() or not isDoubleTapMode() then
+                            return false
+                        end
+                        return self:onDoubleTap(ges)
+                    end,
+                    overrides = {
+                        "readerhighlight_tap",
+                        "readerhighlight_hold",
+                    },
                 },
-                handler = function(ges)
-                    if not isEnabled() or not isDoubleTapMode() then
-                        return false
-                    end
-                    return self:onDoubleTap(ges)
-                end,
-                overrides = {
-                    "readerhighlight_tap",
-                    "readerhighlight_hold",
-                },
-            },
-        })
-        logger.info("[CoverMode] 双击手势已注册")
+            })
+            doubletap_registered = true
+            logger.info("[CoverMode] 双击手势已注册")
+        end
     end
     
     function ReaderHighlight:onDoubleTap(ges)
         if not isEnabled() or not isDoubleTapMode() then
             return false
         end
-        
-        logger.info("[CoverMode] 双击触发")
-        
+ 
         local pos = self.view:screenToPageTransform(ges.pos)
         if not pos then
             return false
@@ -341,7 +396,7 @@ local function patchCoverMode()
     end
     
     -- ============================================================
-    -- 8. 主菜单（中文）
+    -- 8. 主菜单（中文）- 每次打开书本都尝试添加
     -- ============================================================
     local function addToMainMenu(menu_items)
         if menu_items.cover_mode then
@@ -367,7 +422,6 @@ local function patchCoverMode()
                         else
                             Notification:notify(_("遮盖模式已禁用"))
                         end
-                        -- 刷新整个界面
                         local ReaderUI = require("apps/reader/readerui")
                         if ReaderUI and ReaderUI.instance then
                             forceRedraw(ReaderUI.instance)
@@ -428,7 +482,7 @@ local function patchCoverMode()
                     end,
                 },
                 {
-                    text = _("切换模式"),
+                    text = _("单个遮盖-切换模式"),
                     enabled_func = function()
                         return isEnabled()
                     end,
@@ -495,9 +549,7 @@ local function patchCoverMode()
         end
     end
     
-    ReaderView._cover_patched = true
-    logger.info("[CoverMode] 安装完成")
-    
+    -- 每次打开书都尝试添加菜单
     UIManager:scheduleIn(1, tryAddMenu)
 end
 
