@@ -110,14 +110,12 @@ end
 local drawer_patched = false
 
 local function patchCoverMode()
-    logger.info("[CoverMode] 安装补丁...")
     
     local ReaderHighlight = require("apps/reader/modules/readerhighlight")
     local ReaderView = require("apps/reader/modules/readerview")
     local ReaderUI = require("apps/reader/readerui")
     
     if not ReaderView then
-        logger.warn("[CoverMode] ReaderView 未找到")
         return
     end
     
@@ -183,7 +181,6 @@ local function patchCoverMode()
         end
         
         drawer_patched = true
-        logger.info("[CoverMode] 绘制函数已安装")
     end
     
     -- ============================================================
@@ -219,7 +216,6 @@ local function patchCoverMode()
                 },
             })
             doubletap_registered = true
-            logger.info("[CoverMode] 双击手势已注册")
         end
     end
     
@@ -244,7 +240,6 @@ local function patchCoverMode()
         end
         
         if tapped_index then
-            logger.info("[CoverMode] 双击高亮切换, idx=", tapped_index)
             toggleHighlight(self, tapped_index)
             return true
         end
@@ -275,7 +270,6 @@ local function patchCoverMode()
         end
         
         if tapped_index then
-            logger.info("[CoverMode] 单击高亮切换, idx=", tapped_index)
             toggleHighlight(self, tapped_index)
         end
         
@@ -415,7 +409,6 @@ local function patchCoverMode()
                     callback = function(touchmenu_instance)
                         local new_value = not isEnabled()
                         G_reader_settings:saveSetting("cover_mode_enabled", new_value)
-                        logger.info("[CoverMode] 启用遮盖:", new_value)
                         local Notification = require("ui/widget/notification")
                         if new_value then
                             Notification:notify(_("遮盖模式已启用"))
