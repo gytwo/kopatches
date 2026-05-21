@@ -43,10 +43,12 @@
 
 1. `2-reader-covermode (V2)`
 
-- Fixed the issue where toggling cover in PDF had no response (could not match index)
-- Fixed menu loss when switching books (removed the one-time registration restriction)
-- Fixed the issue where some annotations could not be covered in PDF continuous view mode (obtains correct page number via getScrollPagePosition)
-- Note: In PDF paged view mode, due to inconsistency between physical PDF page numbers and actual screen page numbers, double-tap will jump back to the screen page containing the first part of the physical page. PDF continuous view mode or switching to single-tap toggle is recommended.
+- (1) Fixed no response when toggling cover in PDF (cannot match index)
+- (2) Fixed menu loss when switching books (re-add menu on every book open)
+- (3) Fixed inability to cover some highlights in PDF continuous view mode (get correct page number via getScrollPagePosition)
+- (4) Fixed page jump in PDF paged mode (removed recalculate from forceRedraw)
+- (5) Re-register gesture on every book open to ensure double-tap always works
+- (6) Three toggle modes: double-tap, single-tap (block menu), single-tap (show menu)
 
 2. `2-visual-covergenerator-v2`
 
