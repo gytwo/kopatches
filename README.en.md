@@ -32,10 +32,10 @@
 - **Coverable Drawer Types**: Default is Highlight (only highlights are covered). Can be changed, and multiple types can be selected simultaneously.
 - **Note**: Cover mode only affects the currently open book and does not modify the original annotation data. After closing and reopening the book, the original styles (non-cover mode) will be restored.
 
-![covermode-menu-entry](picture/%E9%81%AE%E7%BD%96%E6%A8%A1%E5%BC%8F-%E8%8F%9C%E5%8D%95-%E5%85%A5%E5%8F%A3.png)
-![covermode-main-menu](picture/%E9%81%AE%E7%BD%96%E6%A8%A1%E5%BC%8F-%E8%8F%9C%E5%8D%95-%E4%B8%BB%E8%8F%9C%E5%8D%95.png)
-![covermode-single-toggle](picture/%E9%81%AE%E7%BD%96%E6%A8%A1%E5%BC%8F-%E8%8F%9C%E5%8D%95-%E5%8D%95%E4%B8%AA%E9%81%AE%E7%BD%96%E5%88%87%E6%8D%A2%E6%A8%A1%E5%BC%8F.png)
-![covermode-coverable-styles](picture/%E9%81%AE%E7%BD%96%E6%A8%A1%E5%BC%8F-%E8%8F%9C%E5%8D%95-%E5%8F%AF%E9%81%AE%E7%BD%96%E6%A0%B7%E5%BC%8F.png)
+![covermode-menu-entry](picture//遮盖模式-菜单-入口.png)
+![covermode-main-menu](picture/遮盖模式-菜单-主菜.png)
+![covermode-single-toggle](picture/遮盖模式-菜单-单个遮盖切换模式.png)
+![covermode-coverable-styles](picture/遮盖模式-菜单-可遮盖样式.png)
 
 2. `2-visual-covergenerator-v2`
 
