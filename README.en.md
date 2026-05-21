@@ -17,9 +17,9 @@
 ![uncover-eink](picture/uncover-%E5%A2%A8%E6%B0%B4%E5%B1%8F.png)
 ![cover-android](picture/cover-%E5%AE%89%E5%8D%93%E6%89%8B%E6%9C%BA.jpg)
 ![uncover-android](picture/uncover-%E5%AE%89%E5%8D%93%E6%89%8B%E6%9C%BA.jpg)
-![PDF-cover-all](picture/%E9%81%AE%E7%BD%96%E6%A8%A1%E5%BC%8F-PDF-%E5%85%A8%E9%83%A8%E9%81%AE%E7%BD%96.png)
-![PDF-uncover-all](picture/%E9%81%AE%E7%BD%96%E6%A8%A1%E5%BC%8F-PDF-%E5%85%A8%E9%83%A8%E6%8F%AD%E5%BC%80.png)
-![PDF-toggle-single](picture/%E9%81%AE%E7%BD%96%E6%A8%A1%E5%BC%8F-PDF-%E5%88%87%E6%8D%A2%E5%8D%95%E4%B8%AA%E9%81%AE%E7%BD%96.png)
+![PDF-cover-all](picture/遮盖模式-PDF-全部遮盖.png)
+![PDF-uncover-all](picture/遮盖模式-PDF-全部揭开.png)
+![PDF-toggle-single](picture/遮盖模式-PDF-切换单个遮盖.png)
 
 2. `2-visual-covergenerator-v2`
 
