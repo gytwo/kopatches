@@ -33,7 +33,7 @@
 - **Note**: Cover mode only affects the currently open book and does not modify the original annotation data. After closing and reopening the book, the original styles (non-cover mode) will be restored.
 
 ![covermode-menu-entry](picture//遮盖模式-菜单-入口.png)
-![covermode-main-menu](picture/遮盖模式-菜单-主菜.png)
+![covermode-main-menu](picture/遮盖模式-菜单-主菜单.png)
 ![covermode-single-toggle](picture/遮盖模式-菜单-单个遮盖切换模式.png)
 ![covermode-coverable-styles](picture/遮盖模式-菜单-可遮盖样式.png)
 
