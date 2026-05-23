@@ -468,12 +468,18 @@ local function patchCoverMode()
             end
         end
         
-        if tapped_index then
-            toggleHighlight(self, tapped_index)
-            if mode == 2 then
+       if tapped_index then
+
+       local annotations = self.ui.annotation.annotations
+       local item = annotations and annotations[tapped_index]
+        
+         if item and shouldCoverDrawer(item.drawer) then
+           toggleHighlight(self, tapped_index)
+              if mode == 2 then
                 return true
-            end
-        end
+               end    
+             end
+          end
         
         return original_onTap(self, _, ges)
     end
