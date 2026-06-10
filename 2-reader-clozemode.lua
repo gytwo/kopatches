@@ -60,17 +60,17 @@ end
 
 -- 总开关
 local function isEnabled()
-    return G_reader_settings:readSetting("cover_mode_enabled", true)
+    return G_reader_settings:readSetting("cloze_mode_enabled", true)
 end
 
 -- 切换模式：1 = 双击切换，2 = 单击切换（阻止菜单），3 = 单击切换（弹出菜单）
 local function getToggleMode()
-    return G_reader_settings:readSetting("cover_mode_toggle_mode", 1)
+    return G_reader_settings:readSetting("cloze_mode_toggle_mode", 1)
 end
 
 -- 获取需要遮盖的样式列表
 local function getCoveredDrawers()
-    return G_reader_settings:readSetting("cover_mode_drawers", {lighten = true})
+    return G_reader_settings:readSetting("cloze_mode_drawers", {lighten = true})
 end
 
 -- 检查某个样式是否需要遮盖
@@ -150,7 +150,7 @@ local function buildDrawerSettingsMenu()
             callback = function(touchmenu_instance)
                 local new_value = not covered[drawer]
                 covered[drawer] = new_value
-                G_reader_settings:saveSetting("cover_mode_drawers", covered)
+                G_reader_settings:saveSetting("cloze_mode_drawers", covered)
                 local ReaderUI = require("apps/reader/readerui")
                 if ReaderUI and ReaderUI.instance then
                     forceRedraw(ReaderUI.instance)
@@ -167,11 +167,11 @@ end
 
 -- 添加菜单到阅读器菜单栏
 local function addToMainMenu(menu_items)
-    if menu_items.cover_mode then
+    if menu_items.cloze_mode then
         return
     end
     
-    menu_items.cover_mode = {
+    menu_items.cloze_mode = {
         text = _("遮盖模式"),
         sorting_hint = "typeset",
         sub_item_table = {
@@ -182,7 +182,7 @@ local function addToMainMenu(menu_items)
                 end,
                 callback = function(touchmenu_instance)
                     local new_value = not isEnabled()
-                    G_reader_settings:saveSetting("cover_mode_enabled", new_value)
+                    G_reader_settings:saveSetting("cloze_mode_enabled", new_value)
                     local Notification = require("ui/widget/notification")
                     if new_value then
                         Notification:notify(_("遮盖模式已启用"))
@@ -260,7 +260,7 @@ local function addToMainMenu(menu_items)
                             return getToggleMode() == 1
                         end,
                         callback = function(touchmenu_instance)
-                            G_reader_settings:saveSetting("cover_mode_toggle_mode", 1)
+                            G_reader_settings:saveSetting("cloze_mode_toggle_mode", 1)
                             if touchmenu_instance then
                                 touchmenu_instance:updateItems()
                             end
@@ -272,7 +272,7 @@ local function addToMainMenu(menu_items)
                             return getToggleMode() == 2
                         end,
                         callback = function(touchmenu_instance)
-                            G_reader_settings:saveSetting("cover_mode_toggle_mode", 2)
+                            G_reader_settings:saveSetting("cloze_mode_toggle_mode", 2)
                             if touchmenu_instance then
                                 touchmenu_instance:updateItems()
                             end
@@ -284,7 +284,7 @@ local function addToMainMenu(menu_items)
                             return getToggleMode() == 3
                         end,
                         callback = function(touchmenu_instance)
-                            G_reader_settings:saveSetting("cover_mode_toggle_mode", 3)
+                            G_reader_settings:saveSetting("cloze_mode_toggle_mode", 3)
                             if touchmenu_instance then
                                 touchmenu_instance:updateItems()
                             end
@@ -303,7 +303,7 @@ local function addToMainMenu(menu_items)
     }
 end
 
-local function patchCoverMode()
+local function patchclozemode()
     local ReaderHighlight = require("apps/reader/modules/readerhighlight")
     local ReaderView = require("apps/reader/modules/readerview")
     local ReaderUI = require("apps/reader/readerui")
@@ -468,6 +468,7 @@ local function patchCoverMode()
             end
         end
         
+
        if tapped_index then
 
        local annotations = self.ui.annotation.annotations
@@ -487,7 +488,7 @@ local function patchCoverMode()
     -- ============================================================
     -- 4. 手势处理函数
     -- ============================================================
-    function ReaderUI:onToggleCoverMode()
+    function ReaderUI:onToggleclozemode()
         if not isEnabled() then
             return
         end
@@ -520,13 +521,13 @@ local function patchCoverMode()
     -- ============================================================
     -- 5. 注册 Dispatcher 手势动作
     -- ============================================================
-    Dispatcher:registerAction("toggle_cover_mode_action", {
+    Dispatcher:registerAction("toggle_cloze_mode_action", {
         category = "none",
-        event = "ToggleCoverMode",
+        event = "Toggleclozemode",
         title = _("全部遮盖 / 揭开全部"),
         reader = true,
         ui = true,
     })
 end
 
-patchCoverMode()
+patchclozemode()

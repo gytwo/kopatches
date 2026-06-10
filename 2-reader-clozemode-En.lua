@@ -60,17 +60,17 @@ end
 
 -- Master switch
 local function isEnabled()
-    return G_reader_settings:readSetting("cover_mode_enabled", true)
+    return G_reader_settings:readSetting("cloze_mode_enabled", true)
 end
 
 -- Toggle mode: 1 = double-tap, 2 = single-tap (block menu), 3 = single-tap (show menu)
 local function getToggleMode()
-    return G_reader_settings:readSetting("cover_mode_toggle_mode", 1)
+    return G_reader_settings:readSetting("cloze_mode_toggle_mode", 1)
 end
 
 -- Get list of drawer types to cover
 local function getCoveredDrawers()
-    return G_reader_settings:readSetting("cover_mode_drawers", {lighten = true})
+    return G_reader_settings:readSetting("cloze_mode_drawers", {lighten = true})
 end
 
 -- Check if a specific drawer type needs covering
@@ -150,7 +150,7 @@ local function buildDrawerSettingsMenu()
             callback = function(touchmenu_instance)
                 local new_value = not covered[drawer]
                 covered[drawer] = new_value
-                G_reader_settings:saveSetting("cover_mode_drawers", covered)
+                G_reader_settings:saveSetting("cloze_mode_drawers", covered)
                 local ReaderUI = require("apps/reader/readerui")
                 if ReaderUI and ReaderUI.instance then
                     forceRedraw(ReaderUI.instance)
@@ -167,11 +167,11 @@ end
 
 -- Add menu to reader menu bar
 local function addToMainMenu(menu_items)
-    if menu_items.cover_mode then
+    if menu_items.cloze_mode then
         return
     end
     
-    menu_items.cover_mode = {
+    menu_items.cloze_mode = {
         text = _("Cover Mode"),
         sorting_hint = "typeset",
         sub_item_table = {
@@ -182,7 +182,7 @@ local function addToMainMenu(menu_items)
                 end,
                 callback = function(touchmenu_instance)
                     local new_value = not isEnabled()
-                    G_reader_settings:saveSetting("cover_mode_enabled", new_value)
+                    G_reader_settings:saveSetting("cloze_mode_enabled", new_value)
                     local Notification = require("ui/widget/notification")
                     if new_value then
                         Notification:notify(_("Cover mode enabled"))
@@ -260,7 +260,7 @@ local function addToMainMenu(menu_items)
                             return getToggleMode() == 1
                         end,
                         callback = function(touchmenu_instance)
-                            G_reader_settings:saveSetting("cover_mode_toggle_mode", 1)
+                            G_reader_settings:saveSetting("cloze_mode_toggle_mode", 1)
                             if touchmenu_instance then
                                 touchmenu_instance:updateItems()
                             end
@@ -272,7 +272,7 @@ local function addToMainMenu(menu_items)
                             return getToggleMode() == 2
                         end,
                         callback = function(touchmenu_instance)
-                            G_reader_settings:saveSetting("cover_mode_toggle_mode", 2)
+                            G_reader_settings:saveSetting("cloze_mode_toggle_mode", 2)
                             if touchmenu_instance then
                                 touchmenu_instance:updateItems()
                             end
@@ -284,7 +284,7 @@ local function addToMainMenu(menu_items)
                             return getToggleMode() == 3
                         end,
                         callback = function(touchmenu_instance)
-                            G_reader_settings:saveSetting("cover_mode_toggle_mode", 3)
+                            G_reader_settings:saveSetting("cloze_mode_toggle_mode", 3)
                             if touchmenu_instance then
                                 touchmenu_instance:updateItems()
                             end
@@ -303,7 +303,7 @@ local function addToMainMenu(menu_items)
     }
 end
 
-local function patchCoverMode()
+local function patchclozemode()
     local ReaderHighlight = require("apps/reader/modules/readerhighlight")
     local ReaderView = require("apps/reader/modules/readerview")
     local ReaderUI = require("apps/reader/readerui")
@@ -487,7 +487,7 @@ local function patchCoverMode()
     -- ============================================================
     -- 4. Gesture handler function
     -- ============================================================
-    function ReaderUI:onToggleCoverMode()
+    function ReaderUI:onToggleclozemode()
         if not isEnabled() then
             return
         end
@@ -520,13 +520,13 @@ local function patchCoverMode()
     -- ============================================================
     -- 5. Register Dispatcher gesture action
     -- ============================================================
-    Dispatcher:registerAction("toggle_cover_mode_action", {
+    Dispatcher:registerAction("toggle_cloze_mode_action", {
         category = "none",
-        event = "ToggleCoverMode",
+        event = "Toggleclozemode",
         title = _("Cover all / Uncover all"),
         reader = true,
         ui = true,
     })
 end
 
-patchCoverMode()
+patchclozemode()
