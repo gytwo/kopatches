@@ -1,7 +1,7 @@
 -- 2-quickactions.lua - Quick Actions Panel for KOReader
--- 增强版：集成菜单录制、Nerd Font、5种动作类型、独立存储
+-- QA独立补丁：集成菜单录制、系统动作等5种动作类型、自定义按钮图标、替换Koreader系统图标、替换Koreader系统UI字体
 -- 安装：放入 koreader/patches/ 目录
--- 卸载：删除本文件，同时删除 koreader/settings/quickactions.lua（可选）
+-- 卸载：删除本文件，同时删除 koreader/settings/quickactions.lua（配置文件，可选）
 
 local Blitbuffer = require("ffi/blitbuffer")
 local Device = require("device")
@@ -47,6 +47,7 @@ local util = require("util")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local Event = require("ui/event")
 local IconWidget = require("ui/widget/iconwidget")
+local FontList = require("fontlist")
 
 logger.info("[QuickActions] 加载中...")
 
@@ -80,9 +81,9 @@ end
 -- ============================================================
 
 DEFAULT_CONFIG = {
-    qa_tab_icon = "quickactions",
+    qa_tab_icon = "star.empty",
     qa_enabled = true,
-    qa_slots = { "wifi", "night", "rotate", "restart", "search","qa_add_button","qa_new"},
+    qa_slots = { "wifi", "night", "rotate", "screenshot", "continue", "fontlist", "restart", "search","qa_settings","qa_add_button","qa_new"},
     qa_frontlight = true,
     qa_warmth = true,
     qa_shape = "round",
@@ -99,6 +100,8 @@ DEFAULT_CONFIG = {
     qa_button_hold_edit = true,
     qa_slider_show_value = false,
     qa_filter_initialized = false,
+    qa_icon_overrides = {},
+    ui_font_overrides = {}, 
     version = 1,
 }
 
@@ -341,6 +344,413 @@ local function getButtonSizePct()
 end
 
 -- ============================================================
+-- UI 字体切换功能（三种字体类型，自动替换所有对应的 key）
+-- ============================================================
+
+-- ⭐ 先声明函数，解决循环引用
+local showFontPickerForUIKey
+local showUIFontSwitcher
+
+-- 跟踪对话框
+local _font_picker_dialog = nil
+local _font_main_dialog = nil
+
+-- 获取所有可用字体
+local function getAvailableFonts()
+    local fonts = FontList:getFontList()
+    local result = {}
+    for idx, path in ipairs(fonts) do
+        local fname, name = util.splitFilePathName(path)
+        if name then
+            if name:match("%.ttf$") or name:match("%.otf$") then
+                local display = name:gsub("%.ttf$", ""):gsub("%.otf$", ""):gsub("_", " ")
+                result[#result + 1] = {
+                    name = name,
+                    display = display,
+                }
+            end
+        end
+    end
+    table.sort(result, function(a, b) return a.display:lower() < b.display:lower() end)
+    return result
+end
+
+-- UI字体配置列表（三种字体类型）
+local UI_FONT_ITEMS = {
+    { key = "regular", label = _("常规字体"), default = "NotoSans-Regular.ttf" },
+    { key = "bold", label = _("粗体字体"), default = "NotoSans-Bold.ttf" },
+    { key = "mono", label = _("等宽字体"), default = "DroidSansMono.ttf" },
+}
+
+-- 每种字体类型对应的 fontmap key 列表
+local FONT_TYPE_MAP = {
+    regular = {"cfont", "ffont", "smallffont", "largeffont", "rifont", "pgfont", "hfont", "infofont", "smallinfofont", "x_smallinfofont", "xx_smallinfofont"},
+    bold = {"tfont", "smalltfont", "x_smalltfont", "smallinfofontbold"},
+    mono = {"scfont", "hpkfont", "infont", "smallinfont"},
+}
+
+-- 获取当前字体
+local function getCurrentUIFont(key)
+    local Font = require("ui/font")
+    return Font.fontmap[key] or ""
+end
+
+-- 获取用户覆盖的字体
+local function getUIFontOverride(key)
+    local overrides = getTable("ui_font_overrides") or {}
+    return overrides[key]
+end
+
+-- ⭐ 应用字体变更
+local function applyUIFontChanges()
+    local Font = require("ui/font")
+    
+    local overrides = getTable("ui_font_overrides") or {}
+    
+    local font_exists = {}
+    local fonts = FontList:getFontList()
+    for idx, path in ipairs(fonts) do
+        local fname, name = util.splitFilePathName(path)
+        if name then
+            font_exists[name] = true
+        end
+    end
+    
+    local regular_font = overrides.regular or "NotoSans-Regular.ttf"
+    local bold_font = overrides.bold or "NotoSans-Bold.ttf"
+    local mono_font = overrides.mono or "DroidSansMono.ttf"
+    
+    if font_exists[regular_font] then
+        for _, k in ipairs(FONT_TYPE_MAP.regular) do
+            Font.fontmap[k] = regular_font
+        end
+    end
+    
+    if font_exists[bold_font] then
+        for _, k in ipairs(FONT_TYPE_MAP.bold) do
+            Font.fontmap[k] = bold_font
+        end
+    end
+    
+    if font_exists[mono_font] then
+        for _, k in ipairs(FONT_TYPE_MAP.mono) do
+            Font.fontmap[k] = mono_font
+        end
+    end
+    
+    Font.faces = {}
+    
+    -- 刷新已加载的 Widget 类
+    local ok, Button = pcall(require, "ui/widget/button")
+    if ok and Button then
+        Button.text_font_face = regular_font
+    end
+    
+    local ok, TouchMenu = pcall(require, "ui/widget/touchmenu")
+    if ok and TouchMenu and TouchMenu.fface then
+        local orig_size = TouchMenu.fface.orig_size or 24
+        TouchMenu.fface = Font:getFace("cfont", orig_size)
+    end
+    
+    local ok, ConfirmBox = pcall(require, "ui/widget/confirmbox")
+    if ok and ConfirmBox and ConfirmBox.face then
+        local orig_size = ConfirmBox.face.orig_size or 22
+        ConfirmBox.face = Font:getFace("cfont", orig_size)
+    end
+    
+    local ok, InfoMessage = pcall(require, "ui/widget/infomessage")
+    if ok and InfoMessage then
+        local def_face = Font:getFace("infofont")
+        local orig_size = def_face.orig_size or 22
+        InfoMessage.face = Font:getFace("infofont", orig_size)
+    end
+    
+    -- Notification
+    local ok, Notification = pcall(require, "ui/widget/notification")
+    if ok and Notification then
+        local orig_size = Notification.face.orig_size or 18
+        Notification.face = Font:getFace("x_smallinfofont", orig_size)
+    end
+    
+    local ok, ButtonDialog = pcall(require, "ui/widget/buttondialog")
+    if ok and ButtonDialog then
+        if ButtonDialog.title_face then
+            local orig_size = ButtonDialog.title_face.orig_size or 20
+            ButtonDialog.title_face = Font:getFace("tfont", orig_size)
+        end
+        if ButtonDialog.info_face then
+            local orig_size = ButtonDialog.info_face.orig_size or 22
+            ButtonDialog.info_face = Font:getFace("infofont", orig_size)
+        end
+    end
+    
+    local ok, InputDialog = pcall(require, "ui/widget/inputdialog")
+    if ok and InputDialog and InputDialog.input_face then
+        local orig_size = InputDialog.input_face.orig_size or 16
+        InputDialog.input_face = Font:getFace("infont", orig_size)
+    end
+    
+    local ok, MultiInputDialog = pcall(require, "ui/widget/multiinputdialog")
+    if ok and MultiInputDialog then
+        if MultiInputDialog.title_face then
+            local orig_size = MultiInputDialog.title_face.orig_size or 20
+            MultiInputDialog.title_face = Font:getFace("tfont", orig_size)
+        end
+        if MultiInputDialog.info_face then
+            local orig_size = MultiInputDialog.info_face.orig_size or 22
+            MultiInputDialog.info_face = Font:getFace("infofont", orig_size)
+        end
+    end
+    
+    -- 刷新 Menu 和 TouchMenu 的 item 渲染
+    local ok, Menu = pcall(require, "ui/widget/menu")
+    if ok and Menu and Menu.updateItems then
+        local orig_update = Menu.updateItems
+        Menu.updateItems = function(self, ...)
+            if not self._font_patched then
+                for i = 1, #self.item_group do
+                    local widget = self.item_group[i]
+                    if widget and widget.face then
+                        local cls = getmetatable(widget)
+                        if cls then
+                            cls.font = regular_font
+                            cls.infont = regular_font
+                        end
+                    end
+                end
+                self._font_patched = true
+            end
+            return orig_update(self, ...)
+        end
+    end
+    
+    local ok, TouchMenu2 = pcall(require, "ui/widget/touchmenu")
+    if ok and TouchMenu2 and TouchMenu2.updateItems then
+        local orig_update = TouchMenu2.updateItems
+        TouchMenu2.updateItems = function(self, ...)
+            if not self._font_patched then
+                for i = 1, #self.item_group do
+                    local widget = self.item_group[i]
+                    if widget and widget.face then
+                        local cls = getmetatable(widget)
+                        if cls then
+                            cls.font = regular_font
+                            cls.infont = regular_font
+                        end
+                    end
+                end
+                self._font_patched = true
+            end
+            return orig_update(self, ...)
+        end
+    end
+end
+
+-- ⭐ 设置UI字体覆盖
+local function setUIFontOverride(key, font_name)
+    local overrides = getTable("ui_font_overrides") or {}
+    if font_name then
+        overrides[key] = font_name
+    else
+        overrides[key] = nil
+    end
+    setTable("ui_font_overrides", overrides)
+    applyUIFontChanges()
+    UIManager:setDirty("all", "full")
+end
+
+-- ⭐ 重置所有UI字体
+local function resetAllUIFonts()
+    setTable("ui_font_overrides", {})
+    UIManager:show(Notification:new{
+        text = _("已重置所有UI字体，重启后生效"),
+        timeout = 2,
+    })
+    UIManager:show(ConfirmBox:new{
+        text = _("重启后生效。立即重启？"),
+        ok_text = _("重启"),
+        cancel_text = _("稍后"),
+        ok_callback = function()
+            UIManager:restartKOReader()
+        end,
+    })
+end
+
+-- ⭐ 字体选择器
+function showFontPickerForUIKey(ui_key, ui_label, on_select, on_cancel)
+    if _font_picker_dialog then
+        UIManager:close(_font_picker_dialog)
+        _font_picker_dialog = nil
+    end
+    
+    local all_fonts = getAvailableFonts()
+    local current = getUIFontOverride(ui_key) or ""
+    
+    local buttons = {}
+    
+    table.insert(buttons, {{
+        text = _("应用默认"),
+        callback = function()
+            if _font_picker_dialog then
+                UIManager:close(_font_picker_dialog)
+                _font_picker_dialog = nil
+            end
+            if on_select then on_select(nil) end
+        end,
+    }})
+    table.insert(buttons, {{
+        text = _("返回"),
+        callback = function()
+            if _font_picker_dialog then
+                UIManager:close(_font_picker_dialog)
+                _font_picker_dialog = nil
+            end
+            if on_cancel then on_cancel() end
+        end,
+    }})
+    table.insert(buttons, {})
+    
+    if #all_fonts == 0 then
+        table.insert(buttons, {{
+            text = _("没有可用的字体文件"),
+            enabled = false,
+        }})
+        local dialog = ButtonDialog:new{
+            title = string.format(_("选择 %s 字体"), ui_label),
+            title_align = "center",
+            buttons = buttons,
+            width = math.floor(Screen:getWidth() * 0.7),
+        }
+        _font_picker_dialog = dialog
+        UIManager:show(dialog)
+        return
+    end
+    
+    for i, font in ipairs(all_fonts) do
+        local is_current = (font.name == current)
+        table.insert(buttons, {{
+            text = (is_current and "✓ " or "  ") .. font.display,
+            callback = function()
+                if _font_picker_dialog then
+                    UIManager:close(_font_picker_dialog)
+                    _font_picker_dialog = nil
+                end
+                if on_select then on_select(font.name) end
+            end,
+        }})
+    end
+    
+    local dialog = ButtonDialog:new{
+        title = string.format(_("选择 %s 字体"), ui_label),
+        title_align = "center",
+        buttons = buttons,
+        width = math.floor(Screen:getWidth() * 0.7),
+        max_height = math.floor(Screen:getHeight() * 0.7),
+    }
+    _font_picker_dialog = dialog
+    UIManager:show(dialog)
+end
+
+-- ⭐ 显示UI字体切换主界面
+function showUIFontSwitcher()
+    if _font_main_dialog then
+        UIManager:close(_font_main_dialog)
+        _font_main_dialog = nil
+    end
+    if _font_picker_dialog then
+        UIManager:close(_font_picker_dialog)
+        _font_picker_dialog = nil
+    end
+    
+    local buttons = {}
+    
+    table.insert(buttons, {{
+        text = _("UI字体切换"),
+        enabled = false,
+    }})
+    table.insert(buttons, {})
+    
+    local overrides = getTable("ui_font_overrides") or {}
+    local replaced_count = 0
+    for i, item in ipairs(UI_FONT_ITEMS) do
+        if overrides[item.key] then
+            replaced_count = replaced_count + 1
+        end
+    end
+    local total_count = #UI_FONT_ITEMS
+    
+    table.insert(buttons, {{
+        text = string.format(_("重置全部 (%d/%d)"), replaced_count, total_count),
+        callback = function()
+            if _font_main_dialog then
+                UIManager:close(_font_main_dialog)
+                _font_main_dialog = nil
+            end
+            resetAllUIFonts()
+        end,
+    }})
+    table.insert(buttons, {})
+    
+    for i, item in ipairs(UI_FONT_ITEMS) do
+        local override = overrides[item.key]
+        local display_name = override or item.default
+        local display = display_name:gsub("%.ttf$", ""):gsub("%.otf$", ""):gsub("_", " ")
+        
+        local text = item.label .. ": " .. display
+        if override then
+            local default_display = item.default:gsub("%.ttf$", ""):gsub("%.otf$", ""):gsub("_", " ")
+            text = item.label .. ": " .. default_display .. " → " .. display
+        end
+        
+        table.insert(buttons, {{
+            text = text,
+            callback = function()
+                if _font_main_dialog then
+                    UIManager:close(_font_main_dialog)
+                    _font_main_dialog = nil
+                end
+                showFontPickerForUIKey(
+                    item.key, 
+                    item.label,
+                    function(new_font)
+                        if new_font then
+                            setUIFontOverride(item.key, new_font)
+                            UIManager:show(Notification:new{
+                                text = string.format(_("%s 已设置为 %s"), item.label, new_font),
+                                timeout = 2,
+                            })
+                        else
+                            setUIFontOverride(item.key, nil)
+                            UIManager:show(Notification:new{
+                                text = string.format(_("%s 已重置为默认"), item.label),
+                                timeout = 2,
+                            })
+                        end
+                        showUIFontSwitcher()
+                    end,
+                    function()
+                        showUIFontSwitcher()
+                    end
+                )
+            end,
+        }})
+    end
+    
+    local dialog = ButtonDialog:new{
+        title = _("UI字体切换"),
+        title_align = "center",
+        buttons = buttons,
+        width = math.floor(Screen:getWidth() * 0.7),
+        max_height = math.floor(Screen:getHeight() * 0.7),
+    }
+    _font_main_dialog = dialog
+    UIManager:show(dialog)
+end
+
+-- ⭐ 在文件加载时执行一次
+applyUIFontChanges()
+
+-- ============================================================
 -- Nerd Font 支持（全局函数）
 -- ============================================================
 
@@ -457,7 +867,7 @@ local function getIconWidget(icon_path, size)
 end
 
 -- ============================================================
--- 图标选择器（保持原样，已经独立）
+-- 图标文件浏览器
 -- ============================================================
 
 local THUMB_SIZE = Screen:scaleBySize(32)
@@ -691,7 +1101,7 @@ local function showNerdIconPreview(sentinel, on_select, on_cancel)
     UIManager:show(ConfirmBox:new{
         text = ("U+%s  %s"):format(hex, nerdIconChar(sentinel)) .. "\n\n" .. _("使用这个 Nerd Font 图标？"),
         ok_text = _("确定"),
-        cancel_text = _("取消"),
+        cancel_text = _("返回"),
         ok_callback = function() 
             if on_select then on_select(sentinel) end
         end,
@@ -770,16 +1180,22 @@ end
 -- 扫描图标目录中的 SVG/PNG 文件
 -- ============================================================
 
-local function scanAllIconDirs()
+local function scanAllIconDirs(mode)
+    -- mode: nil 扫描所有目录, "system" 只扫描 resources/icons/mdlight/
     local all_files = {}
     local seen = {}
     
-    local dirs_to_scan = {
-        getIconsDir(),                      -- koreader/icons/
-        "resources/icons/mdlight",          -- KOReader 默认图标
-        "resources/icons",                  -- 备用
-        "resources",                        -- 资源根目录
-    }
+    local dirs_to_scan
+    if mode == "system" then
+        dirs_to_scan = { "resources/icons/mdlight" }
+    else
+        dirs_to_scan = {
+            getIconsDir(),                      -- koreader/icons/
+            "resources/icons/mdlight",          -- KOReader 默认图标
+            "resources/icons",                  -- 备用
+            "resources",                        -- 资源根目录
+        }
+    end
     
     for _, dir in ipairs(dirs_to_scan) do
         if lfs.attributes(dir, "mode") == "directory" then
@@ -808,129 +1224,122 @@ local function scanAllIconDirs()
     return all_files
 end
 
-local function showIconPicker(on_select, saved_icon, filter)
-    -- filter: "file" 只显示文件图标, "nerd" 只显示 Nerd Font, nil/其他 显示全部
+-- ============================================================
+-- 文件图标缓存（正常模式使用，避免重复扫描）
+-- ============================================================
+
+local cached_file_icons = nil
+
+local function getFileIcons()
+    if cached_file_icons == nil then
+        cached_file_icons = scanAllIconDirs()
+    end
+    return cached_file_icons
+end
+
+local function clearFileIconsCache()
+    picker_cache = {} 
+    cached_file_icons = nil
+end
+
+-- ============================================================
+-- 系统图标临时覆盖表（仅预览使用，未保存到配置）
+-- ============================================================
+
+local system_temp_overrides = nil
+
+local function getSystemTempOverrides()
+    if system_temp_overrides == nil then
+        system_temp_overrides = {}
+        local saved = getTable("qa_icon_overrides")
+        for k, v in pairs(saved) do
+            system_temp_overrides[k] = v
+        end
+    end
+    return system_temp_overrides
+end
+
+local function resetSystemTempOverrides()
+    system_temp_overrides = nil
+end
+
+-- ============================================================
+-- 图标选择器（增加网格筛选功能）
+-- ============================================================
+
+local picker_cache = {}
+
+local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
     local sw, sh = Screen:getWidth(), Screen:getHeight()
-    local pad = Screen:scaleBySize(24)  
-    local brd = Screen:scaleBySize(1) 
-    -- ===== 构建混合图标数据 =====
-    local all_items = {}
-    
-    -- 1. Nerd Font 图标（原有列表）
-    if not filter or filter == "nerd" then
-        local nerd_icons = {
-            { hex = "F002" }, { hex = "E690" }, { hex = "F021" }, { hex = "F01E" },
-            { hex = "EB4D" }, { hex = "F00C" }, { hex = "F14A" }, { hex = "2610" },
-            { hex = "2611" }, { hex = "002B" }, { hex = "F067" }, { hex = "F0FE" },
-            { hex = "F142" }, { hex = "F143" }, { hex = "F068" }, { hex = "F00D" },
-            { hex = "F011" }, { hex = "F0AB" }, { hex = "F08B" }, { hex = "F236" },
-            { hex = "F023" }, { hex = "F09C" }, { hex = "F015" }, { hex = "F06A" },
-            { hex = "F071" }, { hex = "F1F8" }, { hex = "F1F4" }, { hex = "F02D" },
-            { hex = "F02E" }, { hex = "F02C" }, { hex = "F1C3" }, { hex = "F187" },
-            { hex = "F02A" }, { hex = "F02B" }, { hex = "F0CA" }, { hex = "F1DA" },
-            { hex = "F07C" }, { hex = "F07B" }, { hex = "F115" }, { hex = "F14A" },
-            { hex = "F15B" }, { hex = "F1C0" }, { hex = "F0A0" }, { hex = "F1C1" },
-            { hex = "F0CE" }, { hex = "F303" }, { hex = "F044" }, { hex = "F0EA" },
-            { hex = "F0C5" }, { hex = "F0E2" }, { hex = "F0DE" }, { hex = "F05A" },
-            { hex = "F059" }, { hex = "2328" }, { hex = "F11C" }, { hex = "F031" },
-            { hex = "F16C" }, { hex = "0041" }, { hex = "6587" }, { hex = "5B57" },
-            { hex = "270D" }, { hex = "F040" }, { hex = "F121" }, { hex = "F126" },
-            { hex = "ECA8" }, { hex = "ECA9" }, { hex = "F0C1" }, { hex = "F0E0" },
-            { hex = "F09E" }, { hex = "F019" }, { hex = "F093" }, { hex = "F1D8" },
-            { hex = "F1D9" }, { hex = "F0C2" }, { hex = "F1ED" }, { hex = "E6AD" },
-            { hex = "F0EC" }, { hex = "F13E" }, { hex = "F09C" }, { hex = "F0AC" },
-            { hex = "F1E4" }, { hex = "F120" }, { hex = "F121" }, { hex = "F127" },
-            { hex = "F0F2" }, { hex = "F0F3" }, { hex = "F1CD" }, { hex = "F1CE" },
-            { hex = "F19B" }, { hex = "F074" }, { hex = "F08E" }, { hex = "F14C" },
-            { hex = "F029" }, { hex = "F1AC" }, { hex = "F0E0" }, { hex = "F0F6" },
-            { hex = "F186" }, { hex = "F185" }, { hex = "F017" }, { hex = "F03E" },
-            { hex = "F030" }, { hex = "F03D" }, { hex = "F130" }, { hex = "F131" },
-            { hex = "F282" }, { hex = "F291" }, { hex = "F008" }, { hex = "F04B" },
-            { hex = "F048" }, { hex = "F04C" }, { hex = "F026" }, { hex = "F027" },
-            { hex = "F028" }, { hex = "F013" }, { hex = "F085" }, { hex = "F0AD" },
-            { hex = "F0D0" }, { hex = "F0EB" }, { hex = "F0B0" }, { hex = "F06E" },
-            { hex = "F070" }, { hex = "F1E7" }, { hex = "F00A" }, { hex = "F00B" },
-            { hex = "F492" }, { hex = "F1E6" }, { hex = "F060" }, { hex = "F061" },
-            { hex = "F062" }, { hex = "F063" }, { hex = "F0A9" }, { hex = "F0AA" },
-            { hex = "F104" }, { hex = "F105" }, { hex = "F106" }, { hex = "F107" },
-            { hex = "F10B" }, { hex = "F28D" }, { hex = "F109" }, { hex = "F108" },
-            { hex = "F28B" }, { hex = "F287" }, { hex = "F233" }, { hex = "F2DB" },
-            { hex = "F135" }, { hex = "F07A" }, { hex = "F291" }, { hex = "F11B" },
-            { hex = "F007" }, { hex = "F0C0" }, { hex = "F086" }, { hex = "F08A" },
-            { hex = "F004" }, { hex = "F005" }, { hex = "F006" }, { hex = "F123" },
-            { hex = "F063" }, { hex = "F0B2" }, { hex = "F2BE" }, { hex = "F095" },
-            { hex = "F1C4" }, { hex = "F1C5" }, { hex = "F1C6" }, { hex = "F1C7" },
-            { hex = "F1C8" }, { hex = "F1C9" }, { hex = "F1CA" }, { hex = "F1C1" },
-            { hex = "F1C2" }, { hex = "E795" }, { hex = "E615" }, { hex = "E70C" },
-            { hex = "E70F" }, { hex = "E708" }, { hex = "E22F" }, { hex = "E20E" },
-            { hex = "E256" }, { hex = "E24B" }, { hex = "E22C" }, { hex = "E7B8" },
-            { hex = "F1B2" }, { hex = "F240" }, { hex = "F1DC" }, { hex = "F073" },
-            { hex = "F29C" }, { hex = "F2A9" }, { hex = "F140" },
-        }
-        
-        for _, icon in ipairs(nerd_icons) do
-            table.insert(all_items, {
-                type = "nerd",
-                hex = icon.hex,
-                value = "nerd:" .. icon.hex,
-            })
-        end
-    end
-    
-    -- 2. 扫描文件图标
-    if not filter or filter == "file" then
-        local file_icons = scanAllIconDirs()
-        for _, file in ipairs(file_icons) do
-            table.insert(all_items, {
-                type = "file",
-                path = file.path,
-                name = file.name,
-                display_name = file.display_name,
-                value = file.path,
-            })
-        end
-    end
-    
-    -- 替换原来的 icons_list
-    local icons_list = all_items
-    local cols = 7
-    local rows = 5
-    local per_page = cols * rows
-    local h_gap = Screen:scaleBySize(15)
-    local v_gap = Screen:scaleBySize(15)
-    local frame_w = math.floor(sw * 0.90)
-    local frame_h = math.floor(sh * 0.70)
-    local content_w = frame_w - 2 * pad - 2 * brd
-    local title_bar_h = Screen:scaleBySize(50)
-    local button_bar_h = Screen:scaleBySize(50)
-    local footer_h = Screen:scaleBySize(40)
-    local cell_w = math.floor((content_w - (cols - 1) * h_gap) / cols)
-    local available_h = frame_h - pad - title_bar_h - button_bar_h - footer_h - pad
-    local cell_h = math.max(44, math.floor((available_h - (rows - 1) * v_gap) / rows))
-    local icon_sz = math.floor(cell_h * 0.55)
-    local font_size = math.floor(icon_sz * 0.85)
-    local cell_pad = math.max(4, math.floor(cell_h * 0.2))
-    local grid_w = cols * cell_w + (cols - 1) * h_gap
-    local grid_h = cell_h * rows + (rows - 1) * v_gap
-    local frame_x = math.floor((sw - frame_w) / 2)
-    local frame_y = math.max(0, math.floor((sh - frame_h) / 2))
-    local total_pages = math.max(1, math.ceil(#icons_list / per_page))
+    local pad = Screen:scaleBySize(24)
+    local brd = Screen:scaleBySize(1)
+
+    local cache_key = (filter or "all") .. "_" .. (mode or "normal")
+    local use_cache = picker_cache[cache_key] ~= nil
+
+    local icons_list, page_widgets, total_pages
+    local frame_x, frame_y, frame_w, frame_h
+    local content_w, title_bar_h, button_bar_h, footer_h
+    local cols, rows, per_page, h_gap, v_gap
+    local cell_w, cell_h, icon_sz, font_size, cell_pad, grid_w, grid_h
+
+    -- ⭐ 提前声明 dialog 和 cur_page
+    local dialog = nil
     local cur_page = 1
-    local page_widgets = {}
-    for p = 1, total_pages do
-        local page_vg = VerticalGroup:new{ align = "left" }
-        local start_idx = (p - 1) * per_page + 1
-        for row = 0, rows - 1 do
-            local row_hg = HorizontalGroup:new{ align = "top" }
-            for col = 0, cols - 1 do
+
+    -- ⭐ 筛选相关变量
+    local filter_keyword = ""
+    local filtered_icons_list = nil
+    local search_dialog = nil
+
+    -- ⭐ 获取显示列表（根据筛选关键词过滤）
+    local function getDisplayList()
+        if filter_keyword == "" then
+            return icons_list
+        end
+        if filtered_icons_list == nil then
+            filtered_icons_list = {}
+            local pattern = filter_keyword:lower()
+            for _, icon in ipairs(icons_list) do
+                local match = false
+                if icon.type == "nerd" then
+                    if icon.hex:lower():find(pattern, 1, true) then
+                        match = true
+                    end
+                else
+                    if icon.display_name and icon.display_name:lower():find(pattern, 1, true) then
+                        match = true
+                    elseif icon.name and icon.name:lower():find(pattern, 1, true) then
+                        match = true
+                    end
+                end
+                if match then
+                    table.insert(filtered_icons_list, icon)
+                end
+            end
+        end
+        return filtered_icons_list
+    end
+
+    -- ⭐ 重建网格
+    local function rebuildPicker()
+        filtered_icons_list = nil
+        local display_list = getDisplayList()
+        local new_total_pages = math.max(1, math.ceil(#display_list / per_page))
+
+        local new_page_widgets = {}
+        for p = 1, new_total_pages do
+            local page_vg = VerticalGroup:new{ align = "left" }
+            local start_idx = (p - 1) * per_page + 1
+            for row = 0, rows - 1 do
+                local row_hg = HorizontalGroup:new{ align = "top" }
+                for col = 0, cols - 1 do
                     local idx = start_idx + row * cols + col
-                    if idx <= #icons_list then
-                        local icon = icons_list[idx]
-                        
-                        -- ⭐ Nerd Font 用 TextWidget，文件用 IconWidget
+                    if idx <= #display_list then
+                        local icon = display_list[idx]
+
                         local icon_widget
                         if icon.type == "nerd" then
-                            -- Nerd Font: 使用 TextWidget 显示字符
                             local nerd_char = nerdIconChar(icon.value)
                             icon_widget = TextWidget:new{
                                 text = nerd_char or "?",
@@ -938,26 +1347,36 @@ local function showIconPicker(on_select, saved_icon, filter)
                                 fgcolor = Blitbuffer.COLOR_BLACK,
                             }
                         else
-                            -- 文件图标: 使用 IconWidget（它会在 icons/ 目录查找文件）
+                            local icon_path = icon.path
+                            if mode == "system" and icon.is_overridden and icon.override_path then
+                                icon_path = icon.override_path
+                            end
                             icon_widget = IconWidget:new{
-                                file = icon.path,  -- 直接传 file，跳过图标名查找
+                                file = icon_path,
                                 width = icon_sz,
                                 height = icon_sz,
                                 alpha = true,
                             }
                             pcall(function() icon_widget:_render() end)
                         end
-                        
+
                         local cell_content = CenterContainer:new{
                             dimen = Geom:new{ w = cell_w - cell_pad*2 - 2, h = cell_h - cell_pad*2 - 2 },
                             icon_widget,
                         }
-                        
+
+                        local border_color = Blitbuffer.COLOR_LIGHT_GRAY
+                        local border_size = 1
+                        if mode == "system" and icon.is_overridden then
+                            border_color = Blitbuffer.COLOR_BLACK
+                            border_size = 2
+                        end
+
                         local cell = FrameContainer:new{
                             width = cell_w,
                             height = cell_h,
-                            bordersize = 1,
-                            color = Blitbuffer.COLOR_LIGHT_GRAY,
+                            bordersize = border_size,
+                            color = border_color,
                             background = Blitbuffer.COLOR_WHITE,
                             radius = Screen:scaleBySize(4),
                             padding = cell_pad,
@@ -968,81 +1387,494 @@ local function showIconPicker(on_select, saved_icon, filter)
                             table.insert(row_hg, HorizontalSpan:new{ width = h_gap })
                         end
                     end
+                end
+                table.insert(page_vg, row_hg)
+                if row < rows - 1 then
+                    table.insert(page_vg, VerticalSpan:new{ width = v_gap })
+                end
             end
-            table.insert(page_vg, row_hg)
-            if row < rows - 1 then
-                table.insert(page_vg, VerticalSpan:new{ width = v_gap })
+            new_page_widgets[p] = page_vg
+        end
+
+        page_widgets = new_page_widgets
+        total_pages = new_total_pages
+        if cur_page > total_pages then
+            cur_page = 1
+        end
+        if dialog then
+            UIManager:setDirty(dialog, function() return "ui", dialog.dimen end)
+        end
+    end
+
+    -- ⭐ 弹出搜索对话框
+    local function showSearchDialog()
+        if search_dialog then
+            UIManager:close(search_dialog)
+            search_dialog = nil
+        end
+        search_dialog = InputDialog:new{
+            title = _("筛选图标"),
+            input = filter_keyword,
+            input_hint = _("输入名称或码位..."),
+            buttons = {
+                {
+                    {
+                        text = _("清除"),
+                        callback = function()
+                            UIManager:close(search_dialog)
+                            search_dialog = nil
+                            filter_keyword = ""
+                            rebuildPicker()
+                        end,
+                    },
+                    {
+                        text = _("取消"),
+                        callback = function()
+                            UIManager:close(search_dialog)
+                            search_dialog = nil
+                        end,
+                    },
+                    {
+                        text = _("确定"),
+                        is_enter_default = true,
+                        callback = function()
+                            local input = search_dialog:getInputText() or ""
+                            filter_keyword = input
+                            UIManager:close(search_dialog)
+                            search_dialog = nil
+                            rebuildPicker()
+                        end,
+                    },
+                }
+            },
+        }
+        UIManager:show(search_dialog)
+        pcall(function() search_dialog:onShowKeyboard() end)
+    end
+
+    if use_cache and mode ~= "system" then
+        local cached = picker_cache[cache_key]
+        icons_list = cached.icons_list
+        page_widgets = cached.page_widgets
+        total_pages = cached.total_pages
+        frame_x = cached.frame_x
+        frame_y = cached.frame_y
+        frame_w = cached.frame_w
+        frame_h = cached.frame_h
+        content_w = cached.content_w
+        title_bar_h = cached.title_bar_h
+        button_bar_h = cached.button_bar_h
+        footer_h = cached.footer_h
+        cols = cached.cols
+        rows = cached.rows
+        per_page = cached.per_page
+        h_gap = cached.h_gap
+        v_gap = cached.v_gap
+        cell_w = cached.cell_w
+        cell_h = cached.cell_h
+        icon_sz = cached.icon_sz
+        font_size = cached.font_size
+        cell_pad = cached.cell_pad
+        grid_w = cached.grid_w
+        grid_h = cached.grid_h
+    end
+
+    local temp_overrides = {}
+    if mode == "system" then
+        temp_overrides = getSystemTempOverrides()
+    end
+
+    if not use_cache or mode == "system" then
+        icons_list = {}
+
+        if (not filter or filter == "nerd") and mode ~= "system" then
+            local nerd_icons = {
+                { hex = "002B" }, { hex = "0041" }, { hex = "2328" }, { hex = "2610" },
+                { hex = "2611" }, { hex = "270D" }, { hex = "5B57" }, { hex = "6587" },
+                { hex = "E001" }, { hex = "E002" }, { hex = "E003" }, { hex = "E008" },
+                { hex = "E20E" }, { hex = "E22B" }, { hex = "E22C" }, { hex = "E22F" },
+                { hex = "E24B" }, { hex = "E256" }, { hex = "E26E" }, { hex = "E2A8" },
+                { hex = "E310" }, { hex = "E312" }, { hex = "E33A" }, { hex = "E33B" },
+                { hex = "E33C" }, { hex = "E33D" }, { hex = "E615" }, { hex = "E6AD" },
+                { hex = "E70C" }, { hex = "E70F" }, { hex = "E708" }, { hex = "E73C" },
+                { hex = "E795" }, { hex = "E7B8" }, { hex = "E83C" }, { hex = "E83D" },
+                { hex = "E87B" }, { hex = "EAC2" }, { hex = "EAC3" }, { hex = "EB5C" },
+                { hex = "EBB0" }, { hex = "ECA8" }, { hex = "ECA9" }, { hex = "ED14" },
+                { hex = "EDE2" }, { hex = "EEB1" }, { hex = "F002" }, { hex = "F004" },
+                { hex = "F005" }, { hex = "F006" }, { hex = "F007" }, { hex = "F008" },
+                { hex = "F00A" }, { hex = "F00B" }, { hex = "F00C" }, { hex = "F00D" },
+                { hex = "F011" }, { hex = "F013" }, { hex = "F015" }, { hex = "F017" },
+                { hex = "F019" }, { hex = "F01D" }, { hex = "F01E" }, { hex = "F021" },
+                { hex = "F023" }, { hex = "F026" }, { hex = "F027" }, { hex = "F028" },
+                { hex = "F029" }, { hex = "F02A" }, { hex = "F02B" }, { hex = "F02C" },
+                { hex = "F02D" }, { hex = "F02E" }, { hex = "F030" }, { hex = "F031" },
+                { hex = "F03D" }, { hex = "F03E" }, { hex = "F040" }, { hex = "F044" },
+                { hex = "F048" }, { hex = "F04B" }, { hex = "F04C" }, { hex = "F059" },
+                { hex = "F05A" }, { hex = "F060" }, { hex = "F061" }, { hex = "F062" },
+                { hex = "F063" }, { hex = "F067" }, { hex = "F068" }, { hex = "F06A" },
+                { hex = "F06E" }, { hex = "F070" }, { hex = "F071" }, { hex = "F072" },
+                { hex = "F073" }, { hex = "F074" }, { hex = "F079" }, { hex = "F07A" },
+                { hex = "F07B" }, { hex = "F07C" }, { hex = "F085" }, { hex = "F086" },
+                { hex = "F08A" }, { hex = "F08B" }, { hex = "F08E" }, { hex = "F093" },
+                { hex = "F095" }, { hex = "F09C" }, { hex = "F09E" }, { hex = "F0A0" },
+                { hex = "F0A9" }, { hex = "F0AA" }, { hex = "F0AB" }, { hex = "F0AC" },
+                { hex = "F0AD" }, { hex = "F0B0" }, { hex = "F0B2" }, { hex = "F0C0" },
+                { hex = "F0C1" }, { hex = "F0C2" }, { hex = "F0C5" }, { hex = "F0CA" },
+                { hex = "F0CE" }, { hex = "F0D0" }, { hex = "F0D2" }, { hex = "F0DE" },
+                { hex = "F0E0" }, { hex = "F0E2" }, { hex = "F0EA" }, { hex = "F0EB" },
+                { hex = "F0EC" }, { hex = "F0ED" }, { hex = "F0EE" }, { hex = "F0F2" },
+                { hex = "F0F3" }, { hex = "F0F6" }, { hex = "F0FE" }, { hex = "F104" },
+                { hex = "F105" }, { hex = "F106" }, { hex = "F107" }, { hex = "F108" },
+                { hex = "F109" }, { hex = "F10B" }, { hex = "F112" }, { hex = "F115" },
+                { hex = "F11B" }, { hex = "F11C" }, { hex = "F120" }, { hex = "F121" },
+                { hex = "F122" }, { hex = "F123" }, { hex = "F125" }, { hex = "F126" },
+                { hex = "F127" }, { hex = "F12E" }, { hex = "F130" }, { hex = "F131" },
+                { hex = "F135" }, { hex = "F13E" }, { hex = "F140" }, { hex = "F142" },
+                { hex = "F143" }, { hex = "F14A" }, { hex = "F14C" }, { hex = "F15B" },
+                { hex = "F16C" }, { hex = "F185" }, { hex = "F186" }, { hex = "F187" },
+                { hex = "F18C" }, { hex = "F19B" }, { hex = "F19C" }, { hex = "F1AC" },
+                { hex = "F1B2" }, { hex = "F1B8" }, { hex = "F1C0" }, { hex = "F1C1" },
+                { hex = "F1C2" }, { hex = "F1C3" }, { hex = "F1C4" }, { hex = "F1C5" },
+                { hex = "F1C6" }, { hex = "F1C7" }, { hex = "F1C8" }, { hex = "F1C9" },
+                { hex = "F1CA" }, { hex = "F1CD" }, { hex = "F1CE" }, { hex = "F1D8" },
+                { hex = "F1D9" }, { hex = "F1DA" }, { hex = "F1DC" }, { hex = "F1E4" },
+                { hex = "F1E6" }, { hex = "F1E7" }, { hex = "F1F4" }, { hex = "F1F8" },
+                { hex = "F1FC" }, { hex = "F233" }, { hex = "F236" }, { hex = "F240" },
+                { hex = "F245" }, { hex = "F25A" }, { hex = "F282" }, { hex = "F287" },
+                { hex = "F28B" }, { hex = "F28D" }, { hex = "F291" }, { hex = "F29C" },
+                { hex = "F2A9" }, { hex = "F2B9" }, { hex = "F2BE" }, { hex = "F2DB" },
+                { hex = "F303" }, { hex = "F405" }, { hex = "F435" }, { hex = "F44C" },
+                { hex = "F45D" }, { hex = "F45E" }, { hex = "F45F" }, { hex = "F46B" },
+                { hex = "F46D" }, { hex = "F46E" }, { hex = "F487" }, { hex = "F492" },
+            }
+            for _, icon in ipairs(nerd_icons) do
+                table.insert(icons_list, {
+                    type = "nerd",
+                    hex = icon.hex,
+                    value = "nerd:" .. icon.hex,
+                })
             end
         end
-        page_widgets[p] = page_vg
+
+        if not filter or filter == "file" then
+            local file_icons
+            if mode == "system" then
+                file_icons = scanAllIconDirs("system")
+            else
+                file_icons = getFileIcons()
+            end
+            for _, file in ipairs(file_icons) do
+                local item = {
+                    type = "file",
+                    path = file.path,
+                    name = file.name,
+                    display_name = file.display_name,
+                    value = file.path,
+                }
+                if mode == "system" then
+                    local override_icon = temp_overrides[file.name]
+                    item.is_overridden = override_icon ~= nil
+                    if override_icon then
+                        local override_path = getIconsDir() .. "/" .. override_icon
+                        if lfs.attributes(override_path, "mode") == "file" then
+                            item.override_path = override_path
+                        end
+                    end
+                end
+                table.insert(icons_list, item)
+            end
+        end
+
+        cols = 7
+        rows = 5
+        per_page = cols * rows
+        h_gap = Screen:scaleBySize(15)
+        v_gap = Screen:scaleBySize(15)
+        frame_w = math.floor(sw * 0.90)
+        frame_h = math.floor(sh * 0.70)
+        content_w = frame_w - 2 * pad - 2 * brd
+        title_bar_h = Screen:scaleBySize(50)
+        button_bar_h = Screen:scaleBySize(50)
+        footer_h = Screen:scaleBySize(40)
+        cell_w = math.floor((content_w - (cols - 1) * h_gap) / cols)
+        local available_h = frame_h - pad - title_bar_h - button_bar_h - footer_h - pad
+        cell_h = math.max(44, math.floor((available_h - (rows - 1) * v_gap) / rows))
+        icon_sz = math.floor(cell_h * 0.55)
+        font_size = math.floor(icon_sz * 0.85)
+        cell_pad = math.max(4, math.floor(cell_h * 0.2))
+        grid_w = cols * cell_w + (cols - 1) * h_gap
+        grid_h = cell_h * rows + (rows - 1) * v_gap
+        frame_x = math.floor((sw - frame_w) / 2)
+        frame_y = math.max(0, math.floor((sh - frame_h) / 2))
+
+        -- 初始构建 page_widgets
+        local display_list = getDisplayList()
+        total_pages = math.max(1, math.ceil(#display_list / per_page))
+        page_widgets = {}
+
+        for p = 1, total_pages do
+            local page_vg = VerticalGroup:new{ align = "left" }
+            local start_idx = (p - 1) * per_page + 1
+            for row = 0, rows - 1 do
+                local row_hg = HorizontalGroup:new{ align = "top" }
+                for col = 0, cols - 1 do
+                    local idx = start_idx + row * cols + col
+                    if idx <= #display_list then
+                        local icon = display_list[idx]
+
+                        local icon_widget
+                        if icon.type == "nerd" then
+                            local nerd_char = nerdIconChar(icon.value)
+                            icon_widget = TextWidget:new{
+                                text = nerd_char or "?",
+                                face = Font:getFace("symbols", font_size),
+                                fgcolor = Blitbuffer.COLOR_BLACK,
+                            }
+                        else
+                            local icon_path = icon.path
+                            if mode == "system" and icon.is_overridden and icon.override_path then
+                                icon_path = icon.override_path
+                            end
+                            icon_widget = IconWidget:new{
+                                file = icon_path,
+                                width = icon_sz,
+                                height = icon_sz,
+                                alpha = true,
+                            }
+                            pcall(function() icon_widget:_render() end)
+                        end
+
+                        local cell_content = CenterContainer:new{
+                            dimen = Geom:new{ w = cell_w - cell_pad*2 - 2, h = cell_h - cell_pad*2 - 2 },
+                            icon_widget,
+                        }
+
+                        local border_color = Blitbuffer.COLOR_LIGHT_GRAY
+                        local border_size = 1
+                        if mode == "system" and icon.is_overridden then
+                            border_color = Blitbuffer.COLOR_BLACK
+                            border_size = 2
+                        end
+
+                        local cell = FrameContainer:new{
+                            width = cell_w,
+                            height = cell_h,
+                            bordersize = border_size,
+                            color = border_color,
+                            background = Blitbuffer.COLOR_WHITE,
+                            radius = Screen:scaleBySize(4),
+                            padding = cell_pad,
+                            cell_content,
+                        }
+                        table.insert(row_hg, cell)
+                        if col < cols - 1 then
+                            table.insert(row_hg, HorizontalSpan:new{ width = h_gap })
+                        end
+                    end
+                end
+                table.insert(page_vg, row_hg)
+                if row < rows - 1 then
+                    table.insert(page_vg, VerticalSpan:new{ width = v_gap })
+                end
+            end
+            page_widgets[p] = page_vg
+        end
+
+        if mode ~= "system" then
+            picker_cache[cache_key] = {
+                icons_list = icons_list,
+                page_widgets = page_widgets,
+                total_pages = total_pages,
+                frame_x = frame_x,
+                frame_y = frame_y,
+                frame_w = frame_w,
+                frame_h = frame_h,
+                content_w = content_w,
+                title_bar_h = title_bar_h,
+                button_bar_h = button_bar_h,
+                footer_h = footer_h,
+                cols = cols,
+                rows = rows,
+                per_page = per_page,
+                h_gap = h_gap,
+                v_gap = v_gap,
+                cell_w = cell_w,
+                cell_h = cell_h,
+                icon_sz = icon_sz,
+                font_size = font_size,
+                cell_pad = cell_pad,
+                grid_w = grid_w,
+                grid_h = grid_h,
+            }
+        end
     end
-    
-    -- 按钮：根据 filter 调整显示
-    local btn_width = math.floor(content_w / 3) - 5
-    
-    -- 只有在显示全部或只显示 Nerd Font 时才显示"更多 Nerd Font 图标"按钮
-    local show_more_btn = not filter or filter == "nerd"
-    local show_browse_btn = not filter or filter == "file"
-    
-    local apply_default_btn = Button:new{
-        text = _("应用默认"),
-        width = btn_width,
-        show_parent = nil,
-        callback = function()
-            UIManager:close(dialog)
-            UIManager:setDirty("all", "full")
-            if on_select then on_select(nil) end
-        end,
-    }
-    
-    local more_btn
-    if show_more_btn then
-        more_btn = Button:new{
-            text = _("更多 Nerd Font 图标"),
-            width = btn_width,
+
+    -- ===== 按钮行 =====
+    local btn_row
+    if mode == "system" then
+        local all_overrides = getTable("qa_icon_overrides")
+        local replaced = 0
+        for _, item in ipairs(icons_list) do
+            if temp_overrides[item.name] then
+                replaced = replaced + 1
+            end
+        end
+
+        local reset_all_btn = Button:new{
+            text = string.format(_("重置全部 (%d)"), replaced),
+            width = math.floor(content_w / 2) - 4,
             show_parent = nil,
             callback = function()
-                UIManager:close(dialog)
-                UIManager:setDirty("all", "full")
-                showNerdIconInput(nil, on_select, saved_icon)
-            end,
-        }
-    end
-    
-    local browse_btn
-    if show_browse_btn then
-        browse_btn = Button:new{
-            text = _("浏览文件"),
-            width = btn_width,
-            show_parent = nil,
-            callback = function()
-                UIManager:close(dialog)
-                UIManager:setDirty("all", "full")
-                UIManager:show(IconBrowser:new{
-                    path = getIconsDir(),
-                    onConfirm = function(file_path)
-                        if on_select then on_select(file_path) end
+                if replaced == 0 then
+                    UIManager:show(InfoMessage:new{
+                        text = _("没有已替换的图标需要重置"),
+                        timeout = 2,
+                    })
+                    return
+                end
+                resetSystemTempOverrides()
+                setTable("qa_icon_overrides", {})
+                picker_cache = {}
+                UIManager:show(Notification:new{
+                    text = _("已重置所有图标，重启后生效"),
+                    timeout = 2,
+                })
+                UIManager:show(ConfirmBox:new{
+                    text = _("重启后生效。立即重启？"),
+                    ok_text = _("重启"),
+                    cancel_text = _("稍后"),
+                    ok_callback = function()
+                        UIManager:restartKOReader()
                     end,
                 })
             end,
         }
-    end
-    
-    -- 构建按钮行
-    local btn_row_children = { apply_default_btn }
-    if show_more_btn then
+
+        local apply_btn = Button:new{
+            text = string.format(_("应用替换 (%d)"), replaced),
+            width = math.floor(content_w / 2) - 4,
+            show_parent = nil,
+            callback = function()
+                if replaced == 0 then
+                    UIManager:show(InfoMessage:new{
+                        text = _("没有已替换的图标需要应用"),
+                        timeout = 2,
+                    })
+                    return
+                end
+                local overrides = getTable("qa_icon_overrides")
+                for k, _ in pairs(overrides) do
+                    overrides[k] = nil
+                end
+                for k, v in pairs(temp_overrides) do
+                    if v then
+                        overrides[k] = v
+                    end
+                end
+                setTable("qa_icon_overrides", overrides)
+                resetSystemTempOverrides()
+                picker_cache = {}
+                UIManager:show(Notification:new{
+                    text = string.format(_("已应用 %d 个图标替换"), replaced),
+                    timeout = 2,
+                })
+                UIManager:show(ConfirmBox:new{
+                    text = _("重启后生效。立即重启？"),
+                    ok_text = _("重启"),
+                    cancel_text = _("稍后"),
+                    ok_callback = function()
+                        UIManager:restartKOReader()
+                    end,
+                })
+            end,
+        }
+
+        btn_row = HorizontalGroup:new{
+            align = "center",
+            reset_all_btn,
+            HorizontalSpan:new{ width = 8 },
+            apply_btn,
+        }
+    else
+        local btn_width = math.floor(content_w / 4) - 5
+        local show_more_btn = not filter or filter == "nerd"
+        local show_browse_btn = not filter or filter == "file"
+
+        local apply_default_btn = Button:new{
+            text = _("应用默认"),
+            width = btn_width,
+            show_parent = nil,
+            callback = function()
+                UIManager:close(dialog)
+                UIManager:setDirty("all", "full")
+                if on_select then on_select(nil) end
+            end,
+        }
+
+        local refresh_btn = Button:new{
+            text = "刷新↻",
+            width = btn_width,
+            show_parent = nil,
+            callback = function()
+                clearFileIconsCache()
+                picker_cache = {}
+                UIManager:close(dialog)
+                UIManager:setDirty("all", "full")
+                showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
+            end,
+        }
+
+        local more_btn
+        if show_more_btn then
+            more_btn = Button:new{
+                text = _("更多 Nerd Font"),
+                width = btn_width,
+                show_parent = nil,
+                callback = function()
+                    UIManager:close(dialog)
+                    UIManager:setDirty("all", "full")
+                    showNerdIconInput(nil, on_select, saved_icon)
+                end,
+            }
+        end
+
+        local browse_btn
+        if show_browse_btn then
+            browse_btn = Button:new{
+                text = _("浏览文件"),
+                width = btn_width,
+                show_parent = nil,
+                callback = function()
+                    UIManager:close(dialog)
+                    UIManager:setDirty("all", "full")
+                    clearFileIconsCache()
+                    UIManager:show(IconBrowser:new{
+                        path = getIconsDir(),
+                        onConfirm = function(file_path)
+                            if on_select then on_select(file_path) end
+                        end,
+                    })
+                end,
+            }
+        end
+
+        local btn_row_children = { apply_default_btn }
         table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
-        table.insert(btn_row_children, more_btn)
+        table.insert(btn_row_children, refresh_btn)
+        if show_more_btn then
+            table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
+            table.insert(btn_row_children, more_btn)
+        end
+        if show_browse_btn then
+            table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
+            table.insert(btn_row_children, browse_btn)
+        end
+        btn_row = HorizontalGroup:new{
+            align = "center",
+            unpack(btn_row_children),
+        }
     end
-    if show_browse_btn then
-        table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
-        table.insert(btn_row_children, browse_btn)
-    end
-    local btn_row = HorizontalGroup:new{
-        align = "center",
-        unpack(btn_row_children),
-    }
-    
+
     local inner_frame = FrameContainer:new{
         width = frame_w,
         height = frame_h,
@@ -1052,6 +1884,7 @@ local function showIconPicker(on_select, saved_icon, filter)
         padding = pad,
         VerticalGroup:new{ align = "center" },
     }
+
     local PickerDlg = InputContainer:extend{}
     function PickerDlg:init()
         self.dimen = Geom:new{ x = 0, y = 0, w = sw, h = sh }
@@ -1069,61 +1902,166 @@ local function showIconPicker(on_select, saved_icon, filter)
                     end
                     local gx, gy = ges.pos.x, ges.pos.y
                     local btn_hit = 80
+
+                    -- 左上角返回按钮
                     if gx >= frame_x + pad and gx < frame_x + pad + btn_hit
-                       and gy >= frame_y + pad and gy < frame_y + pad + btn_hit then
+                            and gy >= frame_y + pad and gy < frame_y + pad + btn_hit then
                         UIManager:close(self)
                         UIManager:setDirty("all", "full")
-                        if on_select then on_select(saved_icon) end
+                        if parent_mode == "system" then
+                            showIconPicker(nil, nil, nil, "system")
+                        else
+                            if on_select then on_select(saved_icon) end
+                        end
                         return true
                     end
+
+                    -- ⭐ 右上角搜索按钮
                     if gx >= frame_x + frame_w - pad - btn_hit and gx < frame_x + frame_w - pad
-                       and gy >= frame_y + pad and gy < frame_y + pad + btn_hit then
-                        UIManager:close(self)
-                        UIManager:setDirty("all", "full")
+                            and gy >= frame_y + pad and gy < frame_y + pad + btn_hit then
+                        showSearchDialog()
                         return true
                     end
+
+                    -- 按钮行点击
                     local btn_y = frame_y + pad + title_bar_h
                     if gy >= btn_y and gy < btn_y + button_bar_h then
-                        local btn_x_start = frame_x + pad
-                        local current_btn_width = math.floor(content_w / 3) - 5
-                        local btn_index = 0
-                        
-                        -- 应用默认按钮
-                        if gx >= btn_x_start and gx < btn_x_start + current_btn_width then
-                            UIManager:close(self)
-                            UIManager:setDirty("all", "full")
-                            if on_select then on_select(nil) end
-                            return true
-                        end
-                        btn_index = btn_index + 1
-                        
-                        if show_more_btn then
-                            local x_start = btn_x_start + (current_btn_width + 8) * btn_index
-                            if gx >= x_start and gx < x_start + current_btn_width then
+                        if mode == "system" then
+                            local btn_width = math.floor(content_w / 2) - 4
+                            local btn_x_start = frame_x + pad
+                            if gx >= btn_x_start and gx < btn_x_start + btn_width then
+                                local all_overrides = getTable("qa_icon_overrides")
+                                local replaced = 0
+                                for _, item in ipairs(icons_list) do
+                                    if temp_overrides[item.name] then
+                                        replaced = replaced + 1
+                                    end
+                                end
+                                if replaced == 0 then
+                                    UIManager:show(InfoMessage:new{
+                                        text = _("没有已替换的图标需要重置"),
+                                        timeout = 2,
+                                    })
+                                    return true
+                                end
                                 UIManager:close(self)
                                 UIManager:setDirty("all", "full")
-                                showNerdIconInput(nil, on_select, saved_icon)
-                                return true
-                            end
-                            btn_index = btn_index + 1
-                        end
-                        
-                        if show_browse_btn then
-                            local x_start = btn_x_start + (current_btn_width + 8) * btn_index
-                            if gx >= x_start and gx < x_start + current_btn_width then
-                                UIManager:close(self)
-                                UIManager:setDirty("all", "full")
-                                UIManager:show(IconBrowser:new{
-                                    path = getIconsDir(),
-                                    onConfirm = function(file_path)
-                                        if on_select then on_select(file_path) end
+                                resetSystemTempOverrides()
+                                setTable("qa_icon_overrides", {})
+                                picker_cache = {}
+                                UIManager:show(Notification:new{
+                                    text = _("已重置所有图标，重启后生效"),
+                                    timeout = 2,
+                                })
+                                UIManager:show(ConfirmBox:new{
+                                    text = _("重启后生效。立即重启？"),
+                                    ok_text = _("重启"),
+                                    cancel_text = _("稍后"),
+                                    ok_callback = function()
+                                        UIManager:restartKOReader()
                                     end,
                                 })
                                 return true
                             end
+                            if gx >= btn_x_start + btn_width + 8 and gx < btn_x_start + (btn_width + 8) * 2 then
+                                local all_overrides = getTable("qa_icon_overrides")
+                                local replaced = 0
+                                for _, item in ipairs(icons_list) do
+                                    if temp_overrides[item.name] then
+                                        replaced = replaced + 1
+                                    end
+                                end
+                                if replaced == 0 then
+                                    UIManager:show(InfoMessage:new{
+                                        text = _("没有已替换的图标需要应用"),
+                                        timeout = 2,
+                                    })
+                                    return true
+                                end
+                                UIManager:close(self)
+                                UIManager:setDirty("all", "full")
+                                local overrides = getTable("qa_icon_overrides")
+                                for k, _ in pairs(overrides) do
+                                    overrides[k] = nil
+                                end
+                                for k, v in pairs(temp_overrides) do
+                                    if v then
+                                        overrides[k] = v
+                                    end
+                                end
+                                setTable("qa_icon_overrides", overrides)
+                                resetSystemTempOverrides()
+                                picker_cache = {}
+                                UIManager:show(Notification:new{
+                                    text = string.format(_("已应用 %d 个图标替换"), replaced),
+                                    timeout = 2,
+                                })
+                                UIManager:show(ConfirmBox:new{
+                                    text = _("重启后生效。立即重启？"),
+                                    ok_text = _("重启"),
+                                    cancel_text = _("稍后"),
+                                    ok_callback = function()
+                                        UIManager:restartKOReader()
+                                    end,
+                                })
+                                return true
+                            end
+                            return true
+                        else
+                            local btn_x_start = frame_x + pad
+                            local current_btn_width = math.floor(content_w / 4) - 5
+                            local btn_index = 0
+
+                            if gx >= btn_x_start and gx < btn_x_start + current_btn_width then
+                                UIManager:close(self)
+                                UIManager:setDirty("all", "full")
+                                if on_select then on_select(nil) end
+                                return true
+                            end
+                            btn_index = btn_index + 1
+
+                            local x_start = btn_x_start + (current_btn_width + 8) * btn_index
+                            if gx >= x_start and gx < x_start + current_btn_width then
+                                clearFileIconsCache()
+                                picker_cache = {}
+                                UIManager:close(self)
+                                UIManager:setDirty("all", "full")
+                                showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
+                                return true
+                            end
+                            btn_index = btn_index + 1
+
+                            if not filter or filter == "nerd" then
+                                local x_start = btn_x_start + (current_btn_width + 8) * btn_index
+                                if gx >= x_start and gx < x_start + current_btn_width then
+                                    UIManager:close(self)
+                                    UIManager:setDirty("all", "full")
+                                    showNerdIconInput(nil, on_select, saved_icon)
+                                    return true
+                                end
+                                btn_index = btn_index + 1
+                            end
+
+                            if not filter or filter == "file" then
+                                local x_start = btn_x_start + (current_btn_width + 8) * btn_index
+                                if gx >= x_start and gx < x_start + current_btn_width then
+                                    UIManager:close(self)
+                                    UIManager:setDirty("all", "full")
+                                    clearFileIconsCache()
+                                    UIManager:show(IconBrowser:new{
+                                        path = getIconsDir(),
+                                        onConfirm = function(file_path)
+                                            if on_select then on_select(file_path) end
+                                        end,
+                                    })
+                                    return true
+                                end
+                            end
+                            return true
                         end
-                        return true
                     end
+
+                    -- 底部翻页
                     local bar_y = frame_y + pad + title_bar_h + button_bar_h + grid_h
                     if gy >= bar_y and gy < bar_y + footer_h then
                         local chev_w = 80
@@ -1142,20 +2080,50 @@ local function showIconPicker(on_select, saved_icon, filter)
                         end
                         return true
                     end
+
+                    -- 网格点击
                     local grid_start_x = frame_x + pad + (content_w - grid_w) / 2
                     local grid_y = frame_y + pad + title_bar_h + button_bar_h
-                                        if gx >= grid_start_x and gx < grid_start_x + grid_w
-                       and gy >= grid_y and gy < grid_y + grid_h then
+                    if gx >= grid_start_x and gx < grid_start_x + grid_w
+                            and gy >= grid_y and gy < grid_y + grid_h then
                         local col = math.floor((gx - grid_start_x) / (cell_w + h_gap))
                         local row = math.floor((gy - grid_y) / (cell_h + v_gap))
+                        local display_list = getDisplayList()
                         local idx = (cur_page - 1) * per_page + row * cols + col + 1
-                        if idx >= 1 and idx <= #icons_list then
-                            local selected_icon = icons_list[idx]
-                            UIManager:close(self)
-                            UIManager:setDirty("all", "full")
-                            -- 统一返回值
-                            if on_select then 
-                                on_select(selected_icon.value)  -- Nerd Font 返回 "nerd:F002"，文件返回路径
+                        if idx >= 1 and idx <= #display_list then
+                            local selected_icon = display_list[idx]
+                            if mode == "system" then
+                                local system_icon_name = selected_icon.name
+                                local current = temp_overrides[system_icon_name]
+                                UIManager:close(self)
+                                UIManager:setDirty("all", "full")
+                                showIconPicker(
+                                    function(selected)
+                                        if selected == current then
+                                            return
+                                        end
+                                        if selected then
+                                            local filename = selected:match("([^/]+)$") or selected
+                                            temp_overrides[system_icon_name] = filename
+                                        else
+                                            temp_overrides[system_icon_name] = nil
+                                        end
+                                        picker_cache = {}
+                                        showIconPicker(nil, nil, nil, "system")
+                                    end,
+                                    current,
+                                    "file",
+                                    nil,
+                                    "system"
+                                )
+                                return true
+                            else
+                                UIManager:close(self)
+                                UIManager:setDirty("all", "full")
+                                if on_select then
+                                    on_select(selected_icon.value)
+                                end
+                                return true
                             end
                         end
                     end
@@ -1188,6 +2156,7 @@ local function showIconPicker(on_select, saved_icon, filter)
             },
         })
     end
+
     function PickerDlg:paintTo(bb, x, y)
         self.dimen.x = x
         self.dimen.y = y
@@ -1195,9 +2164,19 @@ local function showIconPicker(on_select, saved_icon, filter)
         inner_frame:paintTo(bb, frame_x, frame_y)
         local content_x = frame_x + pad
         local content_y = frame_y + pad
-        
-        -- 根据 filter 调整标题
-        local title_text = filter == "file" and _("选择图标文件") or _("选择图标")
+
+        -- 标题
+        local title_text
+        if mode == "system" then
+            title_text = _("系统图标预览")
+        elseif filter == "file" then
+            title_text = _("选择图标文件")
+        else
+            title_text = _("选择图标")
+        end
+        if filter_keyword ~= "" then
+            title_text = title_text .. " [" .. _("筛选") .. ": \"" .. filter_keyword .. "\"]"
+        end
         local title_tw = TextWidget:new{
             text = title_text,
             face = Font:getFace("smallinfofont"),
@@ -1205,25 +2184,47 @@ local function showIconPicker(on_select, saved_icon, filter)
         }
         local title_w = title_tw:getSize().w
         title_tw:paintTo(bb, content_x + (content_w - title_w) / 2, content_y + 12)
+
+        -- 左上角返回
         local back_tw = TextWidget:new{
             text = "↶",
             face = Font:getFace("cfont", 24),
             fgcolor = Blitbuffer.COLOR_BLACK,
         }
         back_tw:paintTo(bb, content_x, content_y + 5)
-        local close_tw = TextWidget:new{
-            text = "✕",
-            face = Font:getFace("cfont", 22),
+
+        -- ⭐ 右上角搜索图标（Nerd Font）
+        local search_char = nerdIconChar("nerd:F002") or "?"
+        local search_tw = TextWidget:new{
+            text = search_char,
+            face = Font:getFace("symbols", 22),
             fgcolor = Blitbuffer.COLOR_BLACK,
         }
-        close_tw:paintTo(bb, content_x + content_w - 30, content_y + 5)
+        search_tw:paintTo(bb, content_x + content_w - 35, content_y + 5)
+
+        -- 按钮行
         local btn_y = content_y + title_bar_h
         btn_row:paintTo(bb, content_x, btn_y)
+
+        -- 网格
         local grid_start_x = content_x + (content_w - grid_w) / 2
         local grid_start_y = content_y + title_bar_h + button_bar_h
-        page_widgets[cur_page]:paintTo(bb, grid_start_x, grid_start_y)
+        local display_list = getDisplayList()
+        if #display_list == 0 then
+            local empty_tw = TextWidget:new{
+                text = _("没有匹配的图标"),
+                face = Font:getFace("cfont"),
+                fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+            }
+            local empty_w = empty_tw:getSize().w
+            empty_tw:paintTo(bb, grid_start_x + (grid_w - empty_w) / 2, grid_start_y + grid_h / 2 - 20)
+        else
+            page_widgets[cur_page]:paintTo(bb, grid_start_x, grid_start_y)
+        end
+
+        -- 翻页
         if total_pages > 1 then
-            local bar_y = grid_start_y + grid_h + (footer_h - 20) / 2 
+            local bar_y = grid_start_y + grid_h + (footer_h - 20) / 2
             local left_arrow = TextWidget:new{
                 text = "◀",
                 face = Font:getFace("cfont", 20),
@@ -1245,7 +2246,8 @@ local function showIconPicker(on_select, saved_icon, filter)
             page_text:paintTo(bb, frame_x + (frame_w - text_w) / 2, bar_y)
         end
     end
-    local dialog = PickerDlg:new{}
+
+    dialog = PickerDlg:new{}
     UIManager:show(dialog, "full")
 end
 
@@ -1899,7 +2901,7 @@ registerAction("rotate", _("旋转"), "nerd:EB4D", true, "common", function(ctx)
     UIManager:broadcastEvent(require("ui/event"):new("SwapRotation"))
 end)
 
-registerAction("screenshot", _("截屏（4秒后）"), "nerd:F10B", false, "common", function(ctx)
+registerAction("screenshot", _("截屏（4秒后）"), "nerd:F030", false, "common", function(ctx)
     local function showCountdown(num)
         UIManager:show(Notification:new{
             text = tostring(num),
@@ -1928,7 +2930,7 @@ registerAction("screenshot", _("截屏（4秒后）"), "nerd:F10B", false, "comm
     end)
 end)
 
-registerAction("continue", _("继续阅读"), "nerd:F02D", false, "common", function(ctx)
+registerAction("continue", _("继续阅读"), "nerd:F405", false, "common", function(ctx)
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     local RH = require("readhistory")
@@ -1990,7 +2992,7 @@ registerAction("power", _("电源"), "nerd:F011", true, "common", function(ctx)
     UIManager:show(ButtonDialog:new{ width = math.floor(Screen:getWidth() * 0.42), buttons = buttons })
 end)
 
-registerAction("httpinspector", _("HTTP服务器"), "nerd:F0C1", true, "common", function()
+registerAction("httpinspector", _("HTTP服务器"), "nerd:F44C", true, "common", function()
     local ui = require("apps/reader/readerui").instance
     if not ui then
         local FM = require("apps/filemanager/filemanager")
@@ -2019,7 +3021,7 @@ registerAction("httpinspector", _("HTTP服务器"), "nerd:F0C1", true, "common",
 end)
 
 -- 字体列表
-registerAction("open_font_list", "字体列表", "nerd:F031", false, "reader", function(ctx)
+registerAction("fontlist", "字体列表", "nerd:F031", false, "reader", function(ctx)
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     local UIManager = require("ui/uimanager")
@@ -2099,7 +3101,7 @@ registerAction("open_font_list", "字体列表", "nerd:F031", false, "reader", f
     UIManager:show(font_dialog)
 end)
 
-registerAction("quickactions_settings", _("快捷操作设置"), "nerd:F013", false, "common", function(ctx)
+registerAction("qa_settings", _("快捷操作设置"), "nerd:F0CA", false, "common", function(ctx)
     showSettingsMenu()
 end)
 
@@ -2116,6 +3118,12 @@ registerAction("qa_new", _("新建快捷操作"), "nerd:F067", false, "common", 
             reader.menu.menu_container[1]:updateItems()
         end
     end)
+end)
+
+
+--UI字体切换
+registerAction("ui_font_switch", _("切换UI字体"), "nerd:5B57", true, "common", function(ctx)
+    showUIFontSwitcher()
 end)
 
 registerAction("qa_add_button", _("添加按钮"), "nerd:F055", false, "common", function()
@@ -2138,7 +3146,7 @@ end)
 -- 内置外部插件及补丁快捷操作
 
 -- 补丁：2-fm-cover.lua（封面视觉设置）
-registerAction("fmcoversettings", _("封面视觉设置"), "nerd:F2A9", false, "filemanager", function()
+registerAction("fmcoversettings", _("封面视觉设置"), "nerd:E22F", false, "filemanager", function()
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     if reader then
@@ -2171,6 +3179,11 @@ registerAction("toggle_cloze_mode", _("遮盖模式"), "nerd:F040", false, "read
             timeout = 2,
         })
     end
+end)
+
+-- 补丁：2-reading-insights-dashboard-v2（统计）
+registerAction("reading_insights", _("阅读统计"), "nerd:F073", false, "common", function(ctx)
+    UIManager:broadcastEvent(Event:new("ShowReadingInsightsPopup"))
 end)
 
 -- 插件：filebrowserplus.koplugin
@@ -2222,7 +3235,7 @@ registerAction("zlibrary_search", _("ZLibrary搜索"), "nerd:005A", false, "comm
 end)
 
 -- 插件：cloudlibrary.koplugin
-registerAction("cloudlibrary_autosync", _("CloudLibrary-省心同步"), "nerd:F021", false, "common", function()
+registerAction("cloudlibrary_autosync", _("CloudLibrary-省心同步"), "nerd:E33B", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
@@ -2244,7 +3257,7 @@ registerAction("cloudlibrary_autosync", _("CloudLibrary-省心同步"), "nerd:F0
 end)
 
 -- 插件：cloudlibrary.koplugin
-registerAction("cloudlibrary_batch_download_books", _("CloudLibrary-批量下载/删除"), "nerd:F019", false, "common", function()
+registerAction("cloudlibrary_batch_download_books", _("CloudLibrary-批量下载/删除"), "nerd:E33A", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
@@ -2266,7 +3279,7 @@ registerAction("cloudlibrary_batch_download_books", _("CloudLibrary-批量下载
 end)
 
 -- 插件：cloudlibrary.koplugin
-registerAction("cloudlibrary_settings", _("CloudLibrary-云库设置"), "nerd:F0CA", false, "common", function()
+registerAction("cloudlibrary_settings", _("CloudLibrary-云库设置"), "nerd:E33D", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
@@ -2296,7 +3309,28 @@ registerAction("annotations_viewer", _("annotationsviewer"), "nerd:F040", false,
     local UIManager = require("ui/uimanager")
     local Event = require("ui/event")
     local RUI = require("apps/reader/readerui")
+    local FM = require("apps/filemanager/filemanager")
+    
     local reader = RUI and RUI.instance
+    local fm = FM and FM.instance
+    
+    -- 检查插件是否安装
+    local has_plugin = false
+    if reader and reader.annotationsviewer then
+        has_plugin = true
+    elseif fm and fm.annotationsviewer then
+        has_plugin = true
+    end
+    
+    if not has_plugin then
+        UIManager:show(InfoMessage:new{
+            text = _("annotationsviewer 插件未安装"),
+            timeout = 2,
+        })
+        return
+    end
+    
+    -- 执行操作
     if reader then
         UIManager:broadcastEvent(Event:new("ShowCurrentBookAnnotations"))
     else
@@ -2386,7 +3420,7 @@ local function getActionSymbol(id)
         end
     end
     if is_builtin then
-        local circle_char = nerdIconChar("nerd:E22F") or "○"
+        local circle_char = nerdIconChar("nerd:E002") or "○"
         return circle_char .. " "
     end
     local cfg = getTable("custom")[id]
@@ -3293,6 +4327,7 @@ function showAddButtonMenu(touch_menu, on_back)
         return a.label:lower() < b.label:lower()
     end)
     local buttons = {}
+    
     if on_back then
         table.insert(buttons, {
             {
@@ -3316,6 +4351,7 @@ function showAddButtonMenu(touch_menu, on_back)
         })
         table.insert(buttons, {})
     end
+    
     local show_fl = showFrontlight()
     table.insert(buttons, {
         {
@@ -3354,7 +4390,69 @@ function showAddButtonMenu(touch_menu, on_back)
             end,
         }
     })
-    table.insert(buttons, {})
+    
+    -- 全选/全不选按钮（放在显示滑块数值下面）
+    local function getAllChecked()
+        for _, action in ipairs(available) do
+            if not slot_set[action.id] then
+                return false
+            end
+        end
+        return true
+    end
+    
+    local all_checked = getAllChecked()
+    table.insert(buttons, {
+        {
+            text = all_checked and "☑ " .. _("全部取消") or "☐ " .. _("全部添加"),
+            callback = function()
+                local is_all_checked = getAllChecked()
+                local current_slots = getQASlots()
+                local new_slots = {}
+                
+                if is_all_checked then
+                    -- 全部取消：只保留不在available中的按钮（如前光、色温等）
+                    for _, id in ipairs(current_slots) do
+                        local is_available = false
+                        for _, action in ipairs(available) do
+                            if action.id == id then
+                                is_available = true
+                                break
+                            end
+                        end
+                        if not is_available then
+                            table.insert(new_slots, id)
+                        end
+                    end
+                else
+                    -- 全部添加：保留现有按钮，添加所有未选中的
+                    for _, id in ipairs(current_slots) do
+                        table.insert(new_slots, id)
+                    end
+                    
+                    for _, action in ipairs(available) do
+                        if not slot_set[action.id] then
+                            if #new_slots >= MAX_SLOTS then
+                                UIManager:show(Notification:new{
+                                    text = string.format(_("最多 %d 个按钮"), MAX_SLOTS),
+                                    timeout = 2,
+                                })
+                                return
+                            end
+                            table.insert(new_slots, action.id)
+                        end
+                    end
+                end
+                
+                saveQASlots(new_slots)
+                if touch_menu then touch_menu:updateItems() end
+                UIManager:close(current_dialog)
+                showAddButtonMenu(touch_menu, on_back)
+            end,
+        }
+    })
+    table.insert(buttons, {})  -- 分隔线
+    
     for i = 1, #available do
         local action = available[i]
         local is_checked = slot_set[action.id] or false
@@ -4709,6 +5807,51 @@ end
 end
 
 -- ============================================================
+-- 重置所有配置
+-- ============================================================
+
+local function resetAllSettings(touch_menu)
+    -- 清空所有缓存
+    picker_cache = {}
+    cached_file_icons = nil
+    system_temp_overrides = nil
+
+    local new_config = {}
+    for k, v in pairs(DEFAULT_CONFIG) do
+        if type(v) == "table" then
+            new_config[k] = {}
+            for k2, v2 in pairs(v) do
+                new_config[k][k2] = v2
+            end
+        else
+            new_config[k] = v
+        end
+    end
+    local f = io.open(CONFIG_PATH, "w")
+    if f then
+        f:write("return " .. serializeTable(new_config))
+        f:close()
+        logger.info("[QuickActions] 配置文件已重写:", CONFIG_PATH)
+    end
+    CONFIG_DATA = new_config
+    local current_menu = nil
+    local fm = require("apps/filemanager/filemanager").instance
+    if fm and fm.menu and fm.menu.menu_container then
+        current_menu = fm.menu.menu_container[1]
+    end
+    if not current_menu then
+        local readerui = require("apps/reader/readerui").instance
+        if readerui and readerui.menu and readerui.menu.menu_container then
+            current_menu = readerui.menu.menu_container[1]
+        end
+    end
+    if current_menu and current_menu.updateItems then
+        current_menu:updateItems()
+    end
+    logger.info("[QuickActions] 配置已重置为默认值")
+end
+
+-- ============================================================
 -- 设置菜单（主入口）
 -- ============================================================
 
@@ -4854,6 +5997,22 @@ local root_menu_items = {
        end,
     },
     {
+        text = _("系统图标替换"),
+        close_on_click = true,
+        callback = function()
+            closeSettingsDialog()
+            showIconPicker(nil, nil, nil, "system")
+        end,
+    },
+    {
+        text = _("UI字体切换"),
+        close_on_click = true,
+        callback = function()
+            closeSettingsDialog()
+            showUIFontSwitcher()
+        end,
+    },
+    {
         text = _("界面过滤"),
         sub_item_table = function()
             return showInterfaceFilterMenu(touch_menu)
@@ -4994,6 +6153,8 @@ local root_menu_items = {
                 qa_auto_add_to_panel = getBool("qa_auto_add_to_panel"),
                 qa_slider_show_value = showSliderValue(),
                 qa_filter_initialized = getBool("qa_filter_initialized"),
+                qa_icon_overrides = json.decode(json.encode(getTable("qa_icon_overrides"))),
+                ui_font_overrides = json.decode(json.encode(getTable("ui_font_overrides"))), 
             }
             setSetting("default_config", default_config)
             UIManager:show(Notification:new{
@@ -5033,6 +6194,14 @@ local root_menu_items = {
             setBool("qa_auto_add_to_panel", default_config.qa_auto_add_to_panel)
             setBool("qa_slider_show_value", default_config.qa_slider_show_value)
             setBool("qa_filter_initialized", default_config.qa_filter_initialized)
+            setTable("qa_icon_overrides", default_config.qa_icon_overrides or {})
+            setTable("ui_font_overrides", default_config.ui_font_overrides or {}) 
+            -- 清空缓存
+            picker_cache = {}
+            cached_file_icons = nil
+            system_temp_overrides = nil
+            -- 应用字体
+            applyUIFontChanges()
             refreshQuickPanel(touch_menu)
             UIManager:show(Notification:new{
                 text = _("已应用默认配置"),
@@ -5770,7 +6939,7 @@ end
 -- ============================================================
 
 local QS_PANEL_TAB = {
-    icon = getString("qa_tab_icon"),
+    icon = getString("qa_tab_icon"),   -- "quickactions"
     remember = false,
     _qs_panel = true,
 }
@@ -5794,17 +6963,17 @@ local function patchFileManagerMenu()
         if FileManagerMenuOrder.tools then
             local already = false
             for _, v in ipairs(FileManagerMenuOrder.tools) do
-                if v == "quickactions_settings" then already = true; break end
+                if v == "qa_settings" then already = true; break end
             end
             if not already then
                 table.insert(FileManagerMenuOrder.tools, 1, "----------------------------")
-                table.insert(FileManagerMenuOrder.tools, 2, "quickactions_settings")
+                table.insert(FileManagerMenuOrder.tools, 2, "qa_settings")
             end
         end
         if not m_self.menu_items then
             m_self.menu_items = {}
         end
-        m_self.menu_items.quickactions_settings = {
+        m_self.menu_items.qa_settings = {
             text = _("快捷操作设置"),
             callback = function()
                 showSettingsMenu()
@@ -5829,16 +6998,16 @@ local function patchReaderMenu()
         if ReaderMenuOrder.tools then
             local already = false
             for _, v in ipairs(ReaderMenuOrder.tools) do
-                if v == "quickactions_settings" then already = true; break end
+                if v == "qa_settings" then already = true; break end
             end
             if not already then
-                table.insert(ReaderMenuOrder.tools, "quickactions_settings")
+                table.insert(ReaderMenuOrder.tools, "qa_settings")
             end
         end
         if not m_self.menu_items then
             m_self.menu_items = {}
         end
-        m_self.menu_items.quickactions_settings = {
+        m_self.menu_items.qa_settings = {
             text = _("快捷操作设置"),
             callback = function()
                 showSettingsMenu()
@@ -5872,6 +7041,36 @@ local function patchReaderMenu()
 end
 
 -- ============================================================
+-- 补丁 IconWidget，支持用户图标覆盖
+-- ============================================================
+
+local function patchIconWidget()
+    local IconWidget = require("ui/widget/iconwidget")
+    if IconWidget._qa_patched then return end
+    IconWidget._qa_patched = true
+    
+    local orig_init = IconWidget.init
+    function IconWidget:init()
+        if self.icon then
+            local overrides = getTable("qa_icon_overrides")
+            if overrides and overrides[self.icon] then
+                local user_icon = overrides[self.icon]
+                local dir = getIconsDir()
+                local full_path = dir .. "/" .. user_icon
+                if lfs.attributes(full_path, "mode") == "file" then
+                    self.file = full_path
+                    self.icon = nil
+                elseif lfs.attributes(user_icon, "mode") == "file" then
+                    self.file = user_icon
+                    self.icon = nil
+                end
+            end
+        end
+        return orig_init(self)
+    end
+end
+
+-- ============================================================
 -- 手势注册
 -- ============================================================
 
@@ -5883,7 +7082,7 @@ local function registerGestures()
         general = true,
     })
 
-    Dispatcher:registerAction("quickactions_settings_action", {
+    Dispatcher:registerAction("qa_settings_action", {
         category = "none",
         event = "QuickActionsSettings",
         title = _("QA：快捷操作设置"),
@@ -5948,46 +7147,6 @@ local function registerGestures()
 end
 
 -- ============================================================
--- 重置所有配置
--- ============================================================
-
-local function resetAllSettings(touch_menu)
-    local new_config = {}
-    for k, v in pairs(DEFAULT_CONFIG) do
-        if type(v) == "table" then
-            new_config[k] = {}
-            for k2, v2 in pairs(v) do
-                new_config[k][k2] = v2
-            end
-        else
-            new_config[k] = v
-        end
-    end
-    local f = io.open(CONFIG_PATH, "w")
-    if f then
-        f:write("return " .. serializeTable(new_config))
-        f:close()
-        logger.info("[QuickActions] 配置文件已重写:", CONFIG_PATH)
-    end
-    CONFIG_DATA = new_config
-    local current_menu = nil
-    local fm = require("apps/filemanager/filemanager").instance
-    if fm and fm.menu and fm.menu.menu_container then
-        current_menu = fm.menu.menu_container[1]
-    end
-    if not current_menu then
-        local readerui = require("apps/reader/readerui").instance
-        if readerui and readerui.menu and readerui.menu.menu_container then
-            current_menu = readerui.menu.menu_container[1]
-        end
-    end
-    if current_menu and current_menu.updateItems then
-        current_menu:updateItems()
-    end
-    logger.info("[QuickActions] 配置已重置为默认值")
-end
-
--- ============================================================
 -- 初始化
 -- ============================================================
 
@@ -6005,6 +7164,7 @@ local function install()
     patchReaderMenu()
     registerGestures()
     initDefaultDedicatedLists()
+    patchIconWidget() 
     logger.info("[QuickActions] 安装完成，配置路径:", CONFIG_PATH)
 end
 
