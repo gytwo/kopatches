@@ -664,12 +664,6 @@ function showUIFontSwitcher()
     
     local buttons = {}
     
-    table.insert(buttons, {{
-        text = _("UI字体切换"),
-        enabled = false,
-    }})
-    table.insert(buttons, {})
-    
     local overrides = getTable("ui_font_overrides") or {}
     local replaced_count = 0
     for i, item in ipairs(UI_FONT_ITEMS) do
@@ -1264,7 +1258,7 @@ local function resetSystemTempOverrides()
 end
 
 -- ============================================================
--- 图标选择器（增加网格筛选功能）
+-- 图标选择器（增加网格筛选功能，屏幕尺寸变化时自动重算布局）
 -- ============================================================
 
 local picker_cache = {}
@@ -1283,16 +1277,16 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
     local cols, rows, per_page, h_gap, v_gap
     local cell_w, cell_h, icon_sz, font_size, cell_pad, grid_w, grid_h
 
-    -- ⭐ 提前声明 dialog 和 cur_page
+    -- 提前声明 dialog 和 cur_page
     local dialog = nil
     local cur_page = 1
 
-    -- ⭐ 筛选相关变量
+    -- 筛选相关变量
     local filter_keyword = ""
     local filtered_icons_list = nil
     local search_dialog = nil
 
-    -- ⭐ 获取显示列表（根据筛选关键词过滤）
+    -- 获取显示列表（根据筛选关键词过滤）
     local function getDisplayList()
         if filter_keyword == "" then
             return icons_list
@@ -1321,7 +1315,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         return filtered_icons_list
     end
 
-    -- ⭐ 重建网格
+    -- 重建网格
     local function rebuildPicker()
         filtered_icons_list = nil
         local display_list = getDisplayList()
@@ -1406,7 +1400,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         end
     end
 
-    -- ⭐ 弹出搜索对话框
+    -- 弹出搜索对话框
     local function showSearchDialog()
         if search_dialog then
             UIManager:close(search_dialog)
@@ -1452,146 +1446,168 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         pcall(function() search_dialog:onShowKeyboard() end)
     end
 
-    if use_cache and mode ~= "system" then
-        local cached = picker_cache[cache_key]
-        icons_list = cached.icons_list
-        page_widgets = cached.page_widgets
-        total_pages = cached.total_pages
-        frame_x = cached.frame_x
-        frame_y = cached.frame_y
-        frame_w = cached.frame_w
-        frame_h = cached.frame_h
-        content_w = cached.content_w
-        title_bar_h = cached.title_bar_h
-        button_bar_h = cached.button_bar_h
-        footer_h = cached.footer_h
-        cols = cached.cols
-        rows = cached.rows
-        per_page = cached.per_page
-        h_gap = cached.h_gap
-        v_gap = cached.v_gap
-        cell_w = cached.cell_w
-        cell_h = cached.cell_h
-        icon_sz = cached.icon_sz
-        font_size = cached.font_size
-        cell_pad = cached.cell_pad
-        grid_w = cached.grid_w
-        grid_h = cached.grid_h
-    end
-
     local temp_overrides = {}
     if mode == "system" then
         temp_overrides = getSystemTempOverrides()
     end
 
-    if not use_cache or mode == "system" then
-        icons_list = {}
-
-        if (not filter or filter == "nerd") and mode ~= "system" then
-            local nerd_icons = {
-                { hex = "002B" }, { hex = "0041" }, { hex = "2328" }, { hex = "2610" },
-                { hex = "2611" }, { hex = "270D" }, { hex = "5B57" }, { hex = "6587" },
-                { hex = "E001" }, { hex = "E002" }, { hex = "E003" }, { hex = "E008" },
-                { hex = "E20E" }, { hex = "E22B" }, { hex = "E22C" }, { hex = "E22F" },
-                { hex = "E24B" }, { hex = "E256" }, { hex = "E26E" }, { hex = "E2A8" },
-                { hex = "E310" }, { hex = "E312" }, { hex = "E33A" }, { hex = "E33B" },
-                { hex = "E33C" }, { hex = "E33D" }, { hex = "E615" }, { hex = "E6AD" },
-                { hex = "E70C" }, { hex = "E70F" }, { hex = "E708" }, { hex = "E73C" },
-                { hex = "E795" }, { hex = "E7B8" }, { hex = "E83C" }, { hex = "E83D" },
-                { hex = "E87B" }, { hex = "EAC2" }, { hex = "EAC3" }, { hex = "EB5C" },
-                { hex = "EBB0" }, { hex = "ECA8" }, { hex = "ECA9" }, { hex = "ED14" },
-                { hex = "EDE2" }, { hex = "EEB1" }, { hex = "F002" }, { hex = "F004" },
-                { hex = "F005" }, { hex = "F006" }, { hex = "F007" }, { hex = "F008" },
-                { hex = "F00A" }, { hex = "F00B" }, { hex = "F00C" }, { hex = "F00D" },
-                { hex = "F011" }, { hex = "F013" }, { hex = "F015" }, { hex = "F017" },
-                { hex = "F019" }, { hex = "F01D" }, { hex = "F01E" }, { hex = "F021" },
-                { hex = "F023" }, { hex = "F026" }, { hex = "F027" }, { hex = "F028" },
-                { hex = "F029" }, { hex = "F02A" }, { hex = "F02B" }, { hex = "F02C" },
-                { hex = "F02D" }, { hex = "F02E" }, { hex = "F030" }, { hex = "F031" },
-                { hex = "F03D" }, { hex = "F03E" }, { hex = "F040" }, { hex = "F044" },
-                { hex = "F048" }, { hex = "F04B" }, { hex = "F04C" }, { hex = "F059" },
-                { hex = "F05A" }, { hex = "F060" }, { hex = "F061" }, { hex = "F062" },
-                { hex = "F063" }, { hex = "F067" }, { hex = "F068" }, { hex = "F06A" },
-                { hex = "F06E" }, { hex = "F070" }, { hex = "F071" }, { hex = "F072" },
-                { hex = "F073" }, { hex = "F074" }, { hex = "F079" }, { hex = "F07A" },
-                { hex = "F07B" }, { hex = "F07C" }, { hex = "F085" }, { hex = "F086" },
-                { hex = "F08A" }, { hex = "F08B" }, { hex = "F08E" }, { hex = "F093" },
-                { hex = "F095" }, { hex = "F09C" }, { hex = "F09E" }, { hex = "F0A0" },
-                { hex = "F0A9" }, { hex = "F0AA" }, { hex = "F0AB" }, { hex = "F0AC" },
-                { hex = "F0AD" }, { hex = "F0B0" }, { hex = "F0B2" }, { hex = "F0C0" },
-                { hex = "F0C1" }, { hex = "F0C2" }, { hex = "F0C5" }, { hex = "F0CA" },
-                { hex = "F0CE" }, { hex = "F0D0" }, { hex = "F0D2" }, { hex = "F0DE" },
-                { hex = "F0E0" }, { hex = "F0E2" }, { hex = "F0EA" }, { hex = "F0EB" },
-                { hex = "F0EC" }, { hex = "F0ED" }, { hex = "F0EE" }, { hex = "F0F2" },
-                { hex = "F0F3" }, { hex = "F0F6" }, { hex = "F0FE" }, { hex = "F104" },
-                { hex = "F105" }, { hex = "F106" }, { hex = "F107" }, { hex = "F108" },
-                { hex = "F109" }, { hex = "F10B" }, { hex = "F112" }, { hex = "F115" },
-                { hex = "F11B" }, { hex = "F11C" }, { hex = "F120" }, { hex = "F121" },
-                { hex = "F122" }, { hex = "F123" }, { hex = "F125" }, { hex = "F126" },
-                { hex = "F127" }, { hex = "F12E" }, { hex = "F130" }, { hex = "F131" },
-                { hex = "F135" }, { hex = "F13E" }, { hex = "F140" }, { hex = "F142" },
-                { hex = "F143" }, { hex = "F14A" }, { hex = "F14C" }, { hex = "F15B" },
-                { hex = "F16C" }, { hex = "F185" }, { hex = "F186" }, { hex = "F187" },
-                { hex = "F18C" }, { hex = "F19B" }, { hex = "F19C" }, { hex = "F1AC" },
-                { hex = "F1B2" }, { hex = "F1B8" }, { hex = "F1C0" }, { hex = "F1C1" },
-                { hex = "F1C2" }, { hex = "F1C3" }, { hex = "F1C4" }, { hex = "F1C5" },
-                { hex = "F1C6" }, { hex = "F1C7" }, { hex = "F1C8" }, { hex = "F1C9" },
-                { hex = "F1CA" }, { hex = "F1CD" }, { hex = "F1CE" }, { hex = "F1D8" },
-                { hex = "F1D9" }, { hex = "F1DA" }, { hex = "F1DC" }, { hex = "F1E4" },
-                { hex = "F1E6" }, { hex = "F1E7" }, { hex = "F1F4" }, { hex = "F1F8" },
-                { hex = "F1FC" }, { hex = "F233" }, { hex = "F236" }, { hex = "F240" },
-                { hex = "F245" }, { hex = "F25A" }, { hex = "F282" }, { hex = "F287" },
-                { hex = "F28B" }, { hex = "F28D" }, { hex = "F291" }, { hex = "F29C" },
-                { hex = "F2A9" }, { hex = "F2B9" }, { hex = "F2BE" }, { hex = "F2DB" },
-                { hex = "F303" }, { hex = "F405" }, { hex = "F435" }, { hex = "F44C" },
-                { hex = "F45D" }, { hex = "F45E" }, { hex = "F45F" }, { hex = "F46B" },
-                { hex = "F46D" }, { hex = "F46E" }, { hex = "F487" }, { hex = "F492" },
-            }
-            for _, icon in ipairs(nerd_icons) do
-                table.insert(icons_list, {
-                    type = "nerd",
-                    hex = icon.hex,
-                    value = "nerd:" .. icon.hex,
-                })
-            end
+    -- ⭐ 检查缓存是否可用（屏幕尺寸未变化）
+    local cache_valid = false
+    if use_cache and mode ~= "system" then
+        local cached = picker_cache[cache_key]
+        if cached.sw == sw and cached.sh == sh then
+            cache_valid = true
+            icons_list = cached.icons_list
+            page_widgets = cached.page_widgets
+            total_pages = cached.total_pages
+            frame_x = cached.frame_x
+            frame_y = cached.frame_y
+            frame_w = cached.frame_w
+            frame_h = cached.frame_h
+            content_w = cached.content_w
+            title_bar_h = cached.title_bar_h
+            button_bar_h = cached.button_bar_h
+            footer_h = cached.footer_h
+            cols = cached.cols
+            rows = cached.rows
+            per_page = cached.per_page
+            h_gap = cached.h_gap
+            v_gap = cached.v_gap
+            cell_w = cached.cell_w
+            cell_h = cached.cell_h
+            icon_sz = cached.icon_sz
+            font_size = cached.font_size
+            cell_pad = cached.cell_pad
+            grid_w = cached.grid_w
+            grid_h = cached.grid_h
         end
+    end
 
-        if not filter or filter == "file" then
-            local file_icons
-            if mode == "system" then
-                file_icons = scanAllIconDirs("system")
-            else
-                file_icons = getFileIcons()
-            end
-            for _, file in ipairs(file_icons) do
-                local item = {
-                    type = "file",
-                    path = file.path,
-                    name = file.name,
-                    display_name = file.display_name,
-                    value = file.path,
+    -- ⭐ 缓存无效或尺寸变化，需要重新构建
+    if not cache_valid then
+        -- 如果缓存存在但尺寸变化，复用 icons_list
+        if use_cache and mode ~= "system" then
+            icons_list = picker_cache[cache_key].icons_list
+        else
+            -- 构建 icons_list
+            icons_list = {}
+
+            if (not filter or filter == "nerd") and mode ~= "system" then
+                local nerd_icons = {
+                    { hex = "002B" }, { hex = "0041" }, { hex = "2328" }, { hex = "2610" },
+                    { hex = "2611" }, { hex = "270D" }, { hex = "5B57" }, { hex = "6587" },
+                    { hex = "E001" }, { hex = "E002" }, { hex = "E003" }, { hex = "E008" },
+                    { hex = "E20E" }, { hex = "E22B" }, { hex = "E22C" }, { hex = "E22F" },
+                    { hex = "E24B" }, { hex = "E256" }, { hex = "E26E" }, { hex = "E2A8" },
+                    { hex = "E310" }, { hex = "E312" }, { hex = "E33A" }, { hex = "E33B" },
+                    { hex = "E33C" }, { hex = "E33D" }, { hex = "E615" }, { hex = "E6AD" },
+                    { hex = "E70C" }, { hex = "E70F" }, { hex = "E708" }, { hex = "E73C" },
+                    { hex = "E795" }, { hex = "E7B8" }, { hex = "E83C" }, { hex = "E83D" },
+                    { hex = "E87B" }, { hex = "EAC2" }, { hex = "EAC3" }, { hex = "EB5C" },
+                    { hex = "EBB0" }, { hex = "ECA8" }, { hex = "ECA9" }, { hex = "ED14" },
+                    { hex = "EDE2" }, { hex = "EEB1" }, { hex = "F002" }, { hex = "F004" },
+                    { hex = "F005" }, { hex = "F006" }, { hex = "F007" }, { hex = "F008" },
+                    { hex = "F00A" }, { hex = "F00B" }, { hex = "F00C" }, { hex = "F00D" },
+                    { hex = "F011" }, { hex = "F013" }, { hex = "F015" }, { hex = "F017" },
+                    { hex = "F019" }, { hex = "F01D" }, { hex = "F01E" }, { hex = "F021" },
+                    { hex = "F023" }, { hex = "F026" }, { hex = "F027" }, { hex = "F028" },
+                    { hex = "F029" }, { hex = "F02A" }, { hex = "F02B" }, { hex = "F02C" },
+                    { hex = "F02D" }, { hex = "F02E" }, { hex = "F030" }, { hex = "F031" },
+                    { hex = "F03D" }, { hex = "F03E" }, { hex = "F040" }, { hex = "F044" },
+                    { hex = "F048" }, { hex = "F04B" }, { hex = "F04C" }, { hex = "F059" },
+                    { hex = "F05A" }, { hex = "F060" }, { hex = "F061" }, { hex = "F062" },
+                    { hex = "F063" }, { hex = "F067" }, { hex = "F068" }, { hex = "F06A" },
+                    { hex = "F06E" }, { hex = "F070" }, { hex = "F071" }, { hex = "F072" },
+                    { hex = "F073" }, { hex = "F074" }, { hex = "F079" }, { hex = "F07A" },
+                    { hex = "F07B" }, { hex = "F07C" }, { hex = "F085" }, { hex = "F086" },
+                    { hex = "F08A" }, { hex = "F08B" }, { hex = "F08E" }, { hex = "F093" },
+                    { hex = "F095" }, { hex = "F09C" }, { hex = "F09E" }, { hex = "F0A0" },
+                    { hex = "F0A9" }, { hex = "F0AA" }, { hex = "F0AB" }, { hex = "F0AC" },
+                    { hex = "F0AD" }, { hex = "F0B0" }, { hex = "F0B2" }, { hex = "F0C0" },
+                    { hex = "F0C1" }, { hex = "F0C2" }, { hex = "F0C5" }, { hex = "F0CA" },
+                    { hex = "F0CE" }, { hex = "F0D0" }, { hex = "F0D2" }, { hex = "F0DE" },
+                    { hex = "F0E0" }, { hex = "F0E2" }, { hex = "F0EA" }, { hex = "F0EB" },
+                    { hex = "F0EC" }, { hex = "F0ED" }, { hex = "F0EE" }, { hex = "F0F2" },
+                    { hex = "F0F3" }, { hex = "F0F6" }, { hex = "F0FE" }, { hex = "F104" },
+                    { hex = "F105" }, { hex = "F106" }, { hex = "F107" }, { hex = "F108" },
+                    { hex = "F109" }, { hex = "F10B" }, { hex = "F112" }, { hex = "F115" },
+                    { hex = "F11B" }, { hex = "F11C" }, { hex = "F120" }, { hex = "F121" },
+                    { hex = "F122" }, { hex = "F123" }, { hex = "F125" }, { hex = "F126" },
+                    { hex = "F127" }, { hex = "F12E" }, { hex = "F130" }, { hex = "F131" },
+                    { hex = "F135" }, { hex = "F13E" }, { hex = "F140" }, { hex = "F142" },
+                    { hex = "F143" }, { hex = "F14A" }, { hex = "F14C" }, { hex = "F15B" },
+                    { hex = "F16C" }, { hex = "F185" }, { hex = "F186" }, { hex = "F187" },
+                    { hex = "F18C" }, { hex = "F19B" }, { hex = "F19C" }, { hex = "F1AC" },
+                    { hex = "F1B2" }, { hex = "F1B8" }, { hex = "F1C0" }, { hex = "F1C1" },
+                    { hex = "F1C2" }, { hex = "F1C3" }, { hex = "F1C4" }, { hex = "F1C5" },
+                    { hex = "F1C6" }, { hex = "F1C7" }, { hex = "F1C8" }, { hex = "F1C9" },
+                    { hex = "F1CA" }, { hex = "F1CD" }, { hex = "F1CE" }, { hex = "F1D8" },
+                    { hex = "F1D9" }, { hex = "F1DA" }, { hex = "F1DC" }, { hex = "F1E4" },
+                    { hex = "F1E6" }, { hex = "F1E7" }, { hex = "F1F4" }, { hex = "F1F8" },
+                    { hex = "F1FC" }, { hex = "F233" }, { hex = "F236" }, { hex = "F240" },
+                    { hex = "F245" }, { hex = "F25A" }, { hex = "F282" }, { hex = "F287" },
+                    { hex = "F28B" }, { hex = "F28D" }, { hex = "F291" }, { hex = "F29C" },
+                    { hex = "F2A9" }, { hex = "F2B9" }, { hex = "F2BE" }, { hex = "F2DB" },
+                    { hex = "F303" }, { hex = "F405" }, { hex = "F435" }, { hex = "F44C" },
+                    { hex = "F45D" }, { hex = "F45E" }, { hex = "F45F" }, { hex = "F46B" },
+                    { hex = "F46D" }, { hex = "F46E" }, { hex = "F487" }, { hex = "F492" },
                 }
+                for _, icon in ipairs(nerd_icons) do
+                    table.insert(icons_list, {
+                        type = "nerd",
+                        hex = icon.hex,
+                        value = "nerd:" .. icon.hex,
+                    })
+                end
+            end
+
+            if not filter or filter == "file" then
+                local file_icons
                 if mode == "system" then
-                    local override_icon = temp_overrides[file.name]
-                    item.is_overridden = override_icon ~= nil
-                    if override_icon then
-                        local override_path = getIconsDir() .. "/" .. override_icon
-                        if lfs.attributes(override_path, "mode") == "file" then
-                            item.override_path = override_path
+                    file_icons = scanAllIconDirs("system")
+                else
+                    file_icons = getFileIcons()
+                end
+                for _, file in ipairs(file_icons) do
+                    local item = {
+                        type = "file",
+                        path = file.path,
+                        name = file.name,
+                        display_name = file.display_name,
+                        value = file.path,
+                    }
+                    if mode == "system" then
+                        local override_icon = temp_overrides[file.name]
+                        item.is_overridden = override_icon ~= nil
+                        if override_icon then
+                            local override_path = getIconsDir() .. "/" .. override_icon
+                            if lfs.attributes(override_path, "mode") == "file" then
+                                item.override_path = override_path
+                            end
                         end
                     end
+                    table.insert(icons_list, item)
                 end
-                table.insert(icons_list, item)
             end
         end
 
-        cols = 7
-        rows = 5
+        -- ⭐ 重新计算布局
+        -- 根据横竖屏选择不同的行列数
+        if sw > sh then
+            -- 横屏
+            cols = 9
+            rows = 4
+            frame_h = math.floor(sh * 0.85)
+        else
+            -- 竖屏
+            cols = 7
+            rows = 5
+            frame_h = math.floor(sh * 0.70)
+        end
         per_page = cols * rows
         h_gap = Screen:scaleBySize(15)
         v_gap = Screen:scaleBySize(15)
         frame_w = math.floor(sw * 0.90)
-        frame_h = math.floor(sh * 0.70)
         content_w = frame_w - 2 * pad - 2 * brd
         title_bar_h = Screen:scaleBySize(50)
         button_bar_h = Screen:scaleBySize(50)
@@ -1607,7 +1623,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         frame_x = math.floor((sw - frame_w) / 2)
         frame_y = math.max(0, math.floor((sh - frame_h) / 2))
 
-        -- 初始构建 page_widgets
+        -- ⭐ 重新构建 page_widgets
         local display_list = getDisplayList()
         total_pages = math.max(1, math.ceil(#display_list / per_page))
         page_widgets = {}
@@ -1680,11 +1696,14 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             page_widgets[p] = page_vg
         end
 
+        -- ⭐ 缓存完整数据（包括屏幕尺寸和布局）
         if mode ~= "system" then
             picker_cache[cache_key] = {
                 icons_list = icons_list,
                 page_widgets = page_widgets,
                 total_pages = total_pages,
+                sw = sw,
+                sh = sh,
                 frame_x = frame_x,
                 frame_y = frame_y,
                 frame_w = frame_w,
