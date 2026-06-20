@@ -771,6 +771,128 @@ local function isNerdIcon(icon_value)
 end
 
 -- ============================================================
+-- 动态生成 Nerd Font 图标列表（从字体文件读取）
+-- ============================================================
+
+local ffi = require("ffi")
+
+-- 动态声明 FT_Get_Glyph_Name
+ffi.cdef[[
+    FT_Error FT_Get_Glyph_Name(FT_Face face, FT_UInt glyph_index, FT_String *buffer, FT_UInt buffer_max);
+]]
+
+local ft2 = ffi.loadlib("freetype", "6")
+
+-- 检测字符码位是否在 Nerd Font 中有效
+local function isValidNerdChar(cp)
+    if not cp or type(cp) ~= "number" then return false end
+    
+    local face = Font:getFace("symbols", 12)
+    if not face or not face.ftsize then return false end
+    
+    return face.ftsize:hasGlyph(cp)
+end
+
+-- 获取 Nerd Font 图标的 glyph 名称
+local function getNerdGlyphName(cp)
+    if not cp or type(cp) ~= "number" then return nil end
+    
+    local face = Font:getFace("symbols", 12)
+    if not face or not face.ftsize then return nil end
+    
+    local ft_face = face.ftsize.face
+    if not ft_face then return nil end
+    
+    local glyph_index = ft2.FT_Get_Char_Index(ft_face, cp)
+    if glyph_index == 0 then return nil end
+    
+    local buffer = ffi.new("FT_String[128]")
+    local err = ft2.FT_Get_Glyph_Name(ft_face, glyph_index, buffer, 128)
+    if err ~= 0 then
+        return nil
+    end
+    return ffi.string(buffer)
+end
+
+-- 动态生成所有有效的 Nerd Font 图标（每次重新扫描）
+local function getNerdIcons()
+    
+    local icons = {}
+    local seen = {}
+    local name_cache = {}
+    
+    local ranges = {
+        -- 第一组：最常用
+        {0x23FB, 0x23FE},  -- 电源符号
+
+        -- 第二组：编程开发图标（Devicons 图标）
+        {0xE700, 0xE7FF},  -- Devicons（编程开发图标）
+
+        -- 第三组：Font Awesome
+        {0xF000, 0xF3FF},  -- Font Awesome 前半
+        {0xF500, 0xF8FF},  -- Font Awesome 后半
+
+        -- 第四组：Material Design
+        {0xE800, 0xE8FF},  -- Material 后半
+        {0xE000, 0xE09F},  -- Material 前半
+        {0xE100, 0xE2FF},  -- Material 中间
+        {0xE400, 0xE6FF},  -- Material 中间
+
+        -- 第五组：Octicons（GitHub 图标）
+        {0xF400, 0xF4FF},  -- Octicons
+
+        -- 第六组：特定领域（用得少，放最后）
+        {0xE300, 0xE3FF},  -- Weather（天气图标）
+        {0xE0A0, 0xE0FF},  -- Powerline（终端装饰符）
+    }
+    
+    -- 第一遍：获取所有有效的码位，并缓存名称
+    for _, range in ipairs(ranges) do
+        for cp = range[1], range[2] do
+            if cp >= 0xD800 and cp <= 0xDFFF then goto continue end
+            
+            if isValidNerdChar(cp) then
+                local hex = string.format("%04X", cp)
+                local key = "nerd:" .. hex
+                if not seen[key] then
+                    seen[key] = true
+                    local glyph_name = getNerdGlyphName(cp)
+                    name_cache[key] = glyph_name
+                end
+            end
+            
+            ::continue::
+        end
+    end
+    
+    -- 第二遍：按 ranges 顺序构建图标列表
+    for _, range in ipairs(ranges) do
+        for cp = range[1], range[2] do
+            if cp >= 0xD800 and cp <= 0xDFFF then goto continue2 end
+            
+            if isValidNerdChar(cp) then
+                local hex = string.format("%04X", cp)
+                local key = "nerd:" .. hex
+                if seen[key] then
+                    local name = name_cache[key]
+                    table.insert(icons, {
+                        type = "nerd",
+                        hex = hex,
+                        value = key,
+                        name = name,
+                    })
+                    seen[key] = nil
+                end
+            end
+            
+            ::continue2::
+        end
+    end
+    
+    return icons
+end
+
+-- ============================================================
 -- 图标目录（全局函数）
 -- ============================================================
 
@@ -1296,8 +1418,12 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             local pattern = filter_keyword:lower()
             for _, icon in ipairs(icons_list) do
                 local match = false
+
                 if icon.type == "nerd" then
                     if icon.hex:lower():find(pattern, 1, true) then
+                        match = true
+                    end
+                    if icon.name and icon.name:lower():find(pattern, 1, true) then
                         match = true
                     end
                 else
@@ -1307,6 +1433,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         match = true
                     end
                 end
+
                 if match then
                     table.insert(filtered_icons_list, icon)
                 end
@@ -1400,16 +1527,27 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         end
     end
 
-    -- 弹出搜索对话框
     local function showSearchDialog()
         if search_dialog then
             UIManager:close(search_dialog)
             search_dialog = nil
         end
+
+        -- 每次按键触发
+        local function onStrike()
+            if search_dialog then
+                filter_keyword = search_dialog:getInputText() or ""
+                filtered_icons_list = nil
+                rebuildPicker()
+                UIManager:setDirty(dialog, function() return "ui", dialog.dimen end)
+            end
+        end
+
         search_dialog = InputDialog:new{
             title = _("筛选图标"),
             input = filter_keyword,
             input_hint = _("输入名称或码位..."),
+            strike_callback = onStrike,  -- 每次按键触发
             buttons = {
                 {
                     {
@@ -1418,25 +1556,16 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             UIManager:close(search_dialog)
                             search_dialog = nil
                             filter_keyword = ""
+                            filtered_icons_list = nil
                             rebuildPicker()
+                            UIManager:setDirty(dialog, function() return "ui", dialog.dimen end)
                         end,
                     },
                     {
-                        text = _("取消"),
+                        text = _("关闭"),
                         callback = function()
                             UIManager:close(search_dialog)
                             search_dialog = nil
-                        end,
-                    },
-                    {
-                        text = _("确定"),
-                        is_enter_default = true,
-                        callback = function()
-                            local input = search_dialog:getInputText() or ""
-                            filter_keyword = input
-                            UIManager:close(search_dialog)
-                            search_dialog = nil
-                            rebuildPicker()
                         end,
                     },
                 }
@@ -1493,70 +1622,13 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             icons_list = {}
 
             if (not filter or filter == "nerd") and mode ~= "system" then
-                local nerd_icons = {
-                    { hex = "002B" }, { hex = "0041" }, { hex = "2328" }, { hex = "2610" },
-                    { hex = "2611" }, { hex = "270D" }, { hex = "5B57" }, { hex = "6587" },
-                    { hex = "E001" }, { hex = "E002" }, { hex = "E003" }, { hex = "E008" },
-                    { hex = "E20E" }, { hex = "E22B" }, { hex = "E22C" }, { hex = "E22F" },
-                    { hex = "E24B" }, { hex = "E256" }, { hex = "E26E" }, { hex = "E2A8" },
-                    { hex = "E310" }, { hex = "E312" }, { hex = "E33A" }, { hex = "E33B" },
-                    { hex = "E33C" }, { hex = "E33D" }, { hex = "E615" }, { hex = "E6AD" },
-                    { hex = "E70C" }, { hex = "E70F" }, { hex = "E708" }, { hex = "E73C" },
-                    { hex = "E795" }, { hex = "E7B8" }, { hex = "E83C" }, { hex = "E83D" },
-                    { hex = "E87B" }, { hex = "EAC2" }, { hex = "EAC3" }, { hex = "EB5C" },
-                    { hex = "EBB0" }, { hex = "ECA8" }, { hex = "ECA9" }, { hex = "ED14" },
-                    { hex = "EDE2" }, { hex = "EEB1" }, { hex = "F002" }, { hex = "F004" },
-                    { hex = "F005" }, { hex = "F006" }, { hex = "F007" }, { hex = "F008" },
-                    { hex = "F00A" }, { hex = "F00B" }, { hex = "F00C" }, { hex = "F00D" },
-                    { hex = "F011" }, { hex = "F013" }, { hex = "F015" }, { hex = "F017" },
-                    { hex = "F019" }, { hex = "F01D" }, { hex = "F01E" }, { hex = "F021" },
-                    { hex = "F023" }, { hex = "F026" }, { hex = "F027" }, { hex = "F028" },
-                    { hex = "F029" }, { hex = "F02A" }, { hex = "F02B" }, { hex = "F02C" },
-                    { hex = "F02D" }, { hex = "F02E" }, { hex = "F030" }, { hex = "F031" },
-                    { hex = "F03D" }, { hex = "F03E" }, { hex = "F040" }, { hex = "F044" },
-                    { hex = "F048" }, { hex = "F04B" }, { hex = "F04C" }, { hex = "F059" },
-                    { hex = "F05A" }, { hex = "F060" }, { hex = "F061" }, { hex = "F062" },
-                    { hex = "F063" }, { hex = "F067" }, { hex = "F068" }, { hex = "F06A" },
-                    { hex = "F06E" }, { hex = "F070" }, { hex = "F071" }, { hex = "F072" },
-                    { hex = "F073" }, { hex = "F074" }, { hex = "F079" }, { hex = "F07A" },
-                    { hex = "F07B" }, { hex = "F07C" }, { hex = "F085" }, { hex = "F086" },
-                    { hex = "F08A" }, { hex = "F08B" }, { hex = "F08E" }, { hex = "F093" },
-                    { hex = "F095" }, { hex = "F09C" }, { hex = "F09E" }, { hex = "F0A0" },
-                    { hex = "F0A9" }, { hex = "F0AA" }, { hex = "F0AB" }, { hex = "F0AC" },
-                    { hex = "F0AD" }, { hex = "F0B0" }, { hex = "F0B2" }, { hex = "F0C0" },
-                    { hex = "F0C1" }, { hex = "F0C2" }, { hex = "F0C5" }, { hex = "F0CA" },
-                    { hex = "F0CE" }, { hex = "F0D0" }, { hex = "F0D2" }, { hex = "F0DE" },
-                    { hex = "F0E0" }, { hex = "F0E2" }, { hex = "F0EA" }, { hex = "F0EB" },
-                    { hex = "F0EC" }, { hex = "F0ED" }, { hex = "F0EE" }, { hex = "F0F2" },
-                    { hex = "F0F3" }, { hex = "F0F6" }, { hex = "F0FE" }, { hex = "F104" },
-                    { hex = "F105" }, { hex = "F106" }, { hex = "F107" }, { hex = "F108" },
-                    { hex = "F109" }, { hex = "F10B" }, { hex = "F112" }, { hex = "F115" },
-                    { hex = "F11B" }, { hex = "F11C" }, { hex = "F120" }, { hex = "F121" },
-                    { hex = "F122" }, { hex = "F123" }, { hex = "F125" }, { hex = "F126" },
-                    { hex = "F127" }, { hex = "F12E" }, { hex = "F130" }, { hex = "F131" },
-                    { hex = "F135" }, { hex = "F13E" }, { hex = "F140" }, { hex = "F142" },
-                    { hex = "F143" }, { hex = "F14A" }, { hex = "F14C" }, { hex = "F15B" },
-                    { hex = "F16C" }, { hex = "F185" }, { hex = "F186" }, { hex = "F187" },
-                    { hex = "F18C" }, { hex = "F19B" }, { hex = "F19C" }, { hex = "F1AC" },
-                    { hex = "F1B2" }, { hex = "F1B8" }, { hex = "F1C0" }, { hex = "F1C1" },
-                    { hex = "F1C2" }, { hex = "F1C3" }, { hex = "F1C4" }, { hex = "F1C5" },
-                    { hex = "F1C6" }, { hex = "F1C7" }, { hex = "F1C8" }, { hex = "F1C9" },
-                    { hex = "F1CA" }, { hex = "F1CD" }, { hex = "F1CE" }, { hex = "F1D8" },
-                    { hex = "F1D9" }, { hex = "F1DA" }, { hex = "F1DC" }, { hex = "F1E4" },
-                    { hex = "F1E6" }, { hex = "F1E7" }, { hex = "F1F4" }, { hex = "F1F8" },
-                    { hex = "F1FC" }, { hex = "F233" }, { hex = "F236" }, { hex = "F240" },
-                    { hex = "F245" }, { hex = "F25A" }, { hex = "F282" }, { hex = "F287" },
-                    { hex = "F28B" }, { hex = "F28D" }, { hex = "F291" }, { hex = "F29C" },
-                    { hex = "F2A9" }, { hex = "F2B9" }, { hex = "F2BE" }, { hex = "F2DB" },
-                    { hex = "F303" }, { hex = "F405" }, { hex = "F435" }, { hex = "F44C" },
-                    { hex = "F45D" }, { hex = "F45E" }, { hex = "F45F" }, { hex = "F46B" },
-                    { hex = "F46D" }, { hex = "F46E" }, { hex = "F487" }, { hex = "F492" },
-                }
+                local nerd_icons = getNerdIcons()
                 for _, icon in ipairs(nerd_icons) do
                     table.insert(icons_list, {
                         type = "nerd",
                         hex = icon.hex,
                         value = "nerd:" .. icon.hex,
+                        name = icon.name,
                     })
                 end
             end
@@ -1592,14 +1664,11 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         end
 
         -- ⭐ 重新计算布局
-        -- 根据横竖屏选择不同的行列数
         if sw > sh then
-            -- 横屏
             cols = 9
             rows = 4
             frame_h = math.floor(sh * 0.85)
         else
-            -- 竖屏
             cols = 7
             rows = 5
             frame_h = math.floor(sh * 0.70)
@@ -1696,7 +1765,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             page_widgets[p] = page_vg
         end
 
-        -- ⭐ 缓存完整数据（包括屏幕尺寸和布局）
+        -- ⭐ 缓存完整数据
         if mode ~= "system" then
             picker_cache[cache_key] = {
                 icons_list = icons_list,
@@ -1816,7 +1885,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         }
     else
         local btn_width = math.floor(content_w / 4) - 5
-        local show_more_btn = not filter or filter == "nerd"
         local show_browse_btn = not filter or filter == "file"
 
         local apply_default_btn = Button:new{
@@ -1843,19 +1911,20 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             end,
         }
 
-        local more_btn
-        if show_more_btn then
-            more_btn = Button:new{
-                text = _("更多 Nerd Font"),
-                width = btn_width,
-                show_parent = nil,
-                callback = function()
-                    UIManager:close(dialog)
-                    UIManager:setDirty("all", "full")
-                    showNerdIconInput(nil, on_select, saved_icon)
-                end,
-            }
-        end
+        local toggle_btn = Button:new{
+            text = (filter == "file") and _("显示完整图标") or _("仅显示file图标"),
+            width = btn_width,
+            show_parent = nil,
+            callback = function()
+                UIManager:close(dialog)
+                UIManager:setDirty("all", "full")
+                if filter == "file" then
+                    showIconPicker(on_select, saved_icon, nil)
+                else
+                    showIconPicker(on_select, saved_icon, "file")
+                end
+            end,
+        }
 
         local browse_btn
         if show_browse_btn then
@@ -1880,10 +1949,8 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         local btn_row_children = { apply_default_btn }
         table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
         table.insert(btn_row_children, refresh_btn)
-        if show_more_btn then
-            table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
-            table.insert(btn_row_children, more_btn)
-        end
+        table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
+        table.insert(btn_row_children, toggle_btn)
         if show_browse_btn then
             table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
             table.insert(btn_row_children, browse_btn)
@@ -1946,9 +2013,9 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                     local btn_y = frame_y + pad + title_bar_h
                     if gy >= btn_y and gy < btn_y + button_bar_h then
                         if mode == "system" then
-                            local btn_width = math.floor(content_w / 2) - 4
+                            local btn_width_sys = math.floor(content_w / 2) - 4
                             local btn_x_start = frame_x + pad
-                            if gx >= btn_x_start and gx < btn_x_start + btn_width then
+                            if gx >= btn_x_start and gx < btn_x_start + btn_width_sys then
                                 local all_overrides = getTable("qa_icon_overrides")
                                 local replaced = 0
                                 for _, item in ipairs(icons_list) do
@@ -1982,7 +2049,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                 })
                                 return true
                             end
-                            if gx >= btn_x_start + btn_width + 8 and gx < btn_x_start + (btn_width + 8) * 2 then
+                            if gx >= btn_x_start + btn_width_sys + 8 and gx < btn_x_start + (btn_width_sys + 8) * 2 then
                                 local all_overrides = getTable("qa_icon_overrides")
                                 local replaced = 0
                                 for _, item in ipairs(icons_list) do
@@ -2031,6 +2098,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             local current_btn_width = math.floor(content_w / 4) - 5
                             local btn_index = 0
 
+                            -- 应用默认
                             if gx >= btn_x_start and gx < btn_x_start + current_btn_width then
                                 UIManager:close(self)
                                 UIManager:setDirty("all", "full")
@@ -2039,6 +2107,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
+                            -- 刷新
                             local x_start = btn_x_start + (current_btn_width + 8) * btn_index
                             if gx >= x_start and gx < x_start + current_btn_width then
                                 clearFileIconsCache()
@@ -2050,19 +2119,23 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
-                            if not filter or filter == "nerd" then
-                                local x_start = btn_x_start + (current_btn_width + 8) * btn_index
-                                if gx >= x_start and gx < x_start + current_btn_width then
-                                    UIManager:close(self)
-                                    UIManager:setDirty("all", "full")
-                                    showNerdIconInput(nil, on_select, saved_icon)
-                                    return true
+                            -- 切换按钮（完整/自定义）
+                            x_start = btn_x_start + (current_btn_width + 8) * btn_index
+                            if gx >= x_start and gx < x_start + current_btn_width then
+                                UIManager:close(self)
+                                UIManager:setDirty("all", "full")
+                                if filter == "file" then
+                                    showIconPicker(on_select, saved_icon, nil)
+                                else
+                                    showIconPicker(on_select, saved_icon, "file")
                                 end
-                                btn_index = btn_index + 1
+                                return true
                             end
+                            btn_index = btn_index + 1
 
+                            -- 浏览文件
                             if not filter or filter == "file" then
-                                local x_start = btn_x_start + (current_btn_width + 8) * btn_index
+                                x_start = btn_x_start + (current_btn_width + 8) * btn_index
                                 if gx >= x_start and gx < x_start + current_btn_width then
                                     UIManager:close(self)
                                     UIManager:setDirty("all", "full")
@@ -2080,10 +2153,10 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         end
                     end
 
-                    -- 底部翻页
+                     -- 底部翻页
                     local bar_y = frame_y + pad + title_bar_h + button_bar_h + grid_h
                     if gy >= bar_y and gy < bar_y + footer_h then
-                        local chev_w = 80
+                        local chev_w = 120
                         if gx < frame_x + pad + chev_w then
                             if cur_page > 1 then
                                 cur_page = cur_page - 1
@@ -2096,8 +2169,46 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                 UIManager:setDirty(self, function() return "ui", self.dimen end)
                             end
                             return true
+                        else
+                            -- 中间区域：弹出输入框，跳转到指定页
+                            local dlg
+                            dlg = InputDialog:new{
+                                title = _("跳转到第几页"),
+                                input = tostring(cur_page),
+                                input_hint = string.format("1 - %d", total_pages),
+                                input_type = "number",
+                                buttons = {
+                                    {
+                                        {
+                                            text = _("取消"),
+                                            callback = function()
+                                                UIManager:close(dlg)
+                                            end,
+                                        },
+                                        {
+                                            text = _("跳转"),
+                                            is_enter_default = true,
+                                            callback = function()
+                                                local page = tonumber(dlg:getInputText())
+                                                if page and page >= 1 and page <= total_pages then
+                                                    cur_page = page
+                                                    UIManager:close(dlg)
+                                                    UIManager:setDirty(self, function() return "ui", self.dimen end)
+                                                else
+                                                    UIManager:show(InfoMessage:new{
+                                                        text = string.format(_("请输入 1 到 %d 之间的数字"), total_pages),
+                                                        timeout = 2,
+                                                    })
+                                                end
+                                            end,
+                                        },
+                                    }
+                                },
+                            }
+                            UIManager:show(dlg)
+                            pcall(function() dlg:onShowKeyboard() end)
+                            return true
                         end
-                        return true
                     end
 
                     -- 网格点击
@@ -2916,11 +3027,11 @@ registerAction("night", _("夜间模式"), "nerd:F186", true, "common", function
     UIManager:setDirty("all", "full")
 end)
 
-registerAction("rotate", _("旋转"), "nerd:EB4D", true, "common", function(ctx)
+registerAction("rotate", _("旋转"), "nerd:E8BC", true, "common", function(ctx)
     UIManager:broadcastEvent(require("ui/event"):new("SwapRotation"))
 end)
 
-registerAction("screenshot", _("截屏（4秒后）"), "nerd:F030", false, "common", function(ctx)
+registerAction("screenshot", _("截屏（4秒后）"), "nerd:E7FF", false, "common", function(ctx)
     local function showCountdown(num)
         UIManager:show(Notification:new{
             text = tostring(num),
@@ -3011,7 +3122,7 @@ registerAction("power", _("电源"), "nerd:F011", true, "common", function(ctx)
     UIManager:show(ButtonDialog:new{ width = math.floor(Screen:getWidth() * 0.42), buttons = buttons })
 end)
 
-registerAction("httpinspector", _("HTTP服务器"), "nerd:F44C", true, "common", function()
+registerAction("httpinspector", _("HTTP服务器"), "nerd:E701", true, "common", function()
     local ui = require("apps/reader/readerui").instance
     if not ui then
         local FM = require("apps/filemanager/filemanager")
@@ -3120,7 +3231,7 @@ registerAction("fontlist", "字体列表", "nerd:F031", false, "reader", functio
     UIManager:show(font_dialog)
 end)
 
-registerAction("qa_settings", _("快捷操作设置"), "nerd:F0CA", false, "common", function(ctx)
+registerAction("qa_settings", _("快捷操作设置"), "nerd:E73A", false, "common", function(ctx)
     showSettingsMenu()
 end)
 
@@ -3232,7 +3343,7 @@ registerAction("filebrowserplus", _("FilebrowserPlus"), "nerd:F029", true, "comm
 end)
 
 -- 插件：zlibrary.koplugin
-registerAction("zlibrary_search", _("ZLibrary搜索"), "nerd:005A", false, "common", function()
+registerAction("zlibrary_search", _("ZLibrary搜索"), "nerd:F494", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
@@ -5450,11 +5561,11 @@ function showCustomQADialog(qa_id, on_done)
             if current_action_type == "plugin" then
                 default_icon = "nerd:F1B2"
             elseif current_action_type == "dispatcher" then
-                default_icon = "nerd:F00A"
+                default_icon = "nerd:E235"
             elseif current_action_type == "menu" then
-                default_icon = "nerd:F28D"
+                default_icon = "nerd:E7FB"
             elseif current_action_type == "collection" then
-                default_icon = "nerd:F006"
+                default_icon = "nerd:E257"
             end
 
             local path, collection, plugin_key, plugin_method, dispatcher_action, dispatcher_value, menu_path
