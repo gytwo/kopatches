@@ -1,7 +1,7 @@
 -- 2-quickactions.lua - Quick Actions Panel for KOReader
 -- QA standalone patch: integrated menu recording, system actions (5 action types), custom button icons, KOReader system icon replacement, KOReader system UI font replacement
 -- Installation: place in koreader/patches/ directory
--- Uninstallation: delete this file, and optionally delete koreader/settings/quickactions.lua (configuration file)
+-- Uninstallation: delete this file, also delete koreader/settings/quickactions.lua (config file, optional)
 
 local Blitbuffer = require("ffi/blitbuffer")
 local Device = require("device")
@@ -101,7 +101,7 @@ DEFAULT_CONFIG = {
     qa_slider_show_value = false,
     qa_filter_initialized = false,
     qa_icon_overrides = {},
-    ui_font_overrides = {},
+    ui_font_overrides = {}, 
     version = 1,
 }
 
@@ -188,13 +188,13 @@ local function loadConfig()
                 logger.warn("[QuickActions] load failed:", err)
             end
         end
-        logger.warn("[QuickActions] Configuration file corrupted, overwriting with default")
+        logger.warn("[QuickActions] Configuration file corrupted, overwriting with default config")
         CONFIG_DATA = DEFAULT_CONFIG
         saveConfig()
         return CONFIG_DATA
     end
     
-    logger.info("[QuickActions] Configuration file does not exist, creating default")
+    logger.info("[QuickActions] Configuration file not found, creating default config")
     CONFIG_DATA = DEFAULT_CONFIG
     saveConfig()
     return CONFIG_DATA
@@ -280,7 +280,7 @@ local function refreshQuickPanel(touch_menu)
 end
 
 -- ============================================================
--- Convenience configuration access functions (global)
+-- Convenience config access functions (global)
 -- ============================================================
 
 local function isQAEnabled()
@@ -344,14 +344,14 @@ local function getButtonSizePct()
 end
 
 -- ============================================================
--- UI font switching functionality (three font types, automatically replaces all corresponding keys)
+-- UI Font switching feature (3 font types, automatically replaces all corresponding keys)
 -- ============================================================
 
 -- Declare functions first to resolve circular references
 local showFontPickerForUIKey
 local showUIFontSwitcher
 
--- Track dialogs
+-- Dialog tracking
 local _font_picker_dialog = nil
 local _font_main_dialog = nil
 
@@ -375,14 +375,14 @@ local function getAvailableFonts()
     return result
 end
 
--- UI font configuration list (three font types)
+-- UI font configuration list (3 font types)
 local UI_FONT_ITEMS = {
     { key = "regular", label = _("Regular font"), default = "NotoSans-Regular.ttf" },
     { key = "bold", label = _("Bold font"), default = "NotoSans-Bold.ttf" },
     { key = "mono", label = _("Monospace font"), default = "DroidSansMono.ttf" },
 }
 
--- Font type to fontmap key mapping
+-- Font type mapping to fontmap keys
 local FONT_TYPE_MAP = {
     regular = {"cfont", "ffont", "smallffont", "largeffont", "rifont", "pgfont", "hfont", "infofont", "smallinfofont", "x_smallinfofont", "xx_smallinfofont"},
     bold = {"tfont", "smalltfont", "x_smalltfont", "smallinfofontbold"},
@@ -563,11 +563,11 @@ end
 local function resetAllUIFonts()
     setTable("ui_font_overrides", {})
     UIManager:show(Notification:new{
-        text = _("All UI fonts reset, restart required"),
+        text = _("All UI fonts have been reset, restart to take effect"),
         timeout = 2,
     })
     UIManager:show(ConfirmBox:new{
-        text = _("Restart required. Restart now?"),
+        text = _("Restart required to take effect. Restart now?"),
         ok_text = _("Restart"),
         cancel_text = _("Later"),
         ok_callback = function()
@@ -710,13 +710,13 @@ function showUIFontSwitcher()
                         if new_font then
                             setUIFontOverride(item.key, new_font)
                             UIManager:show(Notification:new{
-                                text = string.format(_("%s set to %s"), item.label, new_font),
+                                text = string.format(_("%s has been set to %s"), item.label, new_font),
                                 timeout = 2,
                             })
                         else
                             setUIFontOverride(item.key, nil)
                             UIManager:show(Notification:new{
-                                text = string.format(_("%s reset to default"), item.label),
+                                text = string.format(_("%s has been reset to default"), item.label),
                                 timeout = 2,
                             })
                         end
@@ -771,6 +771,128 @@ local function isNerdIcon(icon_value)
 end
 
 -- ============================================================
+-- Dynamic Nerd Font icon list generation (read from font file)
+-- ============================================================
+
+local ffi = require("ffi")
+
+-- Declare FT_Get_Glyph_Name
+ffi.cdef[[
+    FT_Error FT_Get_Glyph_Name(FT_Face face, FT_UInt glyph_index, FT_String *buffer, FT_UInt buffer_max);
+]]
+
+local ft2 = ffi.loadlib("freetype", "6")
+
+-- Check if a character code point is valid in Nerd Font
+local function isValidNerdChar(cp)
+    if not cp or type(cp) ~= "number" then return false end
+    
+    local face = Font:getFace("symbols", 12)
+    if not face or not face.ftsize then return false end
+    
+    return face.ftsize:hasGlyph(cp)
+end
+
+-- Get Nerd Font glyph name
+local function getNerdGlyphName(cp)
+    if not cp or type(cp) ~= "number" then return nil end
+    
+    local face = Font:getFace("symbols", 12)
+    if not face or not face.ftsize then return nil end
+    
+    local ft_face = face.ftsize.face
+    if not ft_face then return nil end
+    
+    local glyph_index = ft2.FT_Get_Char_Index(ft_face, cp)
+    if glyph_index == 0 then return nil end
+    
+    local buffer = ffi.new("FT_String[128]")
+    local err = ft2.FT_Get_Glyph_Name(ft_face, glyph_index, buffer, 128)
+    if err ~= 0 then
+        return nil
+    end
+    return ffi.string(buffer)
+end
+
+-- Dynamically generate all valid Nerd Font icons (rescan each time)
+local function getNerdIcons()
+    
+    local icons = {}
+    local seen = {}
+    local name_cache = {}
+    
+    local ranges = {
+        -- Group 1: Most commonly used
+        {0x23FB, 0x23FE},  -- Power symbols
+
+        -- Group 2: Devicons (programming/development icons)
+        {0xE700, 0xE7FF},  -- Devicons
+
+        -- Group 3: Font Awesome
+        {0xF000, 0xF3FF},  -- Font Awesome first half
+        {0xF500, 0xF8FF},  -- Font Awesome second half
+
+        -- Group 4: Material Design
+        {0xE800, 0xE8FF},  -- Material second half
+        {0xE000, 0xE09F},  -- Material first half
+        {0xE100, 0xE2FF},  -- Material middle
+        {0xE400, 0xE6FF},  -- Material middle
+
+        -- Group 5: Octicons (GitHub icons)
+        {0xF400, 0xF4FF},  -- Octicons
+
+        -- Group 6: Domain-specific (less used, placed last)
+        {0xE300, 0xE3FF},  -- Weather icons
+        {0xE0A0, 0xE0FF},  -- Powerline (terminal decorators)
+    }
+    
+    -- First pass: get all valid code points and cache names
+    for _, range in ipairs(ranges) do
+        for cp = range[1], range[2] do
+            if cp >= 0xD800 and cp <= 0xDFFF then goto continue end
+            
+            if isValidNerdChar(cp) then
+                local hex = string.format("%04X", cp)
+                local key = "nerd:" .. hex
+                if not seen[key] then
+                    seen[key] = true
+                    local glyph_name = getNerdGlyphName(cp)
+                    name_cache[key] = glyph_name
+                end
+            end
+            
+            ::continue::
+        end
+    end
+    
+    -- Second pass: build icon list in range order
+    for _, range in ipairs(ranges) do
+        for cp = range[1], range[2] do
+            if cp >= 0xD800 and cp <= 0xDFFF then goto continue2 end
+            
+            if isValidNerdChar(cp) then
+                local hex = string.format("%04X", cp)
+                local key = "nerd:" .. hex
+                if seen[key] then
+                    local name = name_cache[key]
+                    table.insert(icons, {
+                        type = "nerd",
+                        hex = hex,
+                        value = key,
+                        name = name,
+                    })
+                    seen[key] = nil
+                end
+            end
+            
+            ::continue2::
+        end
+    end
+    
+    return icons
+end
+
+-- ============================================================
 -- Icon directory (global functions)
 -- ============================================================
 
@@ -800,7 +922,7 @@ local function getIconFile(icon_name)
         base_dir = DataStorage:getDataDir()
     end
     
-    -- 3. Treat as relative path (relative to koreader/ directory)
+    -- 3. Look up as relative path (relative to koreader/ directory)
     if base_dir ~= "" then
         local full_path = base_dir .. "/" .. icon_name
         full_path = full_path:gsub("/%.", ""):gsub("/+", "/")
@@ -809,7 +931,7 @@ local function getIconFile(icon_name)
         end
     end
     
-    -- 4. Finally, strip all paths, keep only filename, search all icon directories (same as IconWidget)
+    -- 4. Finally, strip path and search all icon directories (same as IconWidget)
     local filename = icon_name:match("([^/]+)$") or icon_name
     local dirs_to_check = {
         getIconsDir(),                      -- koreader/icons/
@@ -986,7 +1108,7 @@ function _InnerIconChooser:onMenuSelect(item)
             self.show_parent:onClose()
         end
         if self.onConfirm then
-            self.onConfirm(path)
+            self.onConfirm(path)  -- Use path directly, no absolute path conversion
         end
         return true
     end
@@ -1014,15 +1136,15 @@ function IconBrowser:init()
     local final_path = nil
     for _, path in ipairs(paths_to_check) do
         if lfs.attributes(path, "mode") == "directory" then
-            final_path = path
+            final_path = path  -- Use directly, no absolute path conversion
             logger.info("[QuickActions] Using icon directory:", final_path)
             break
         end
     end
     if not final_path then
-        logger.warn("[QuickActions] No available directory found")
+        logger.warn("[QuickActions] Cannot find any available directory")
         UIManager:show(InfoMessage:new{
-            text = _("Icon directory not found, cannot open icon browser"),
+            text = _("Cannot find icon directory, unable to open icon browser"),
             timeout = 3,
         })
         return
@@ -1114,8 +1236,8 @@ local function showNerdIconInput(current_icon, on_select, saved_icon)
         dlg = InputDialog:new{
             title = _("Nerd Font Icon"),
             input = current_hex:upper(),
-            input_hint = _("Hexadecimal codepoint, e.g., E001"),
-            description = _("Enter the Unicode codepoint (hexadecimal) for Nerd Fonts symbols.\nLeave empty and confirm to remove the Nerd Font icon."),
+            input_hint = _("Hexadecimal code point, e.g., E001"),
+            description = _("Enter the Unicode code point (hexadecimal) of the Nerd Fonts symbol.\nLeave empty and confirm to remove the Nerd Font icon."),
             buttons = {{
                 {
                     text = _("Back"),
@@ -1150,7 +1272,7 @@ local function showNerdIconInput(current_icon, on_select, saved_icon)
                                 end)
                             else
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Invalid Unicode codepoint"),
+                                    text = _("Invalid Unicode code point"),
                                     timeout = 3,
                                 })
                             end
@@ -1185,8 +1307,8 @@ local function scanAllIconDirs(mode)
         dirs_to_scan = {
             getIconsDir(),                      -- koreader/icons/
             "resources/icons/mdlight",          -- KOReader default icons
-            "resources/icons",                  -- fallback
-            "resources",                        -- resource root
+            "resources/icons",                  -- Fallback
+            "resources",                        -- Resources root
         }
     end
     
@@ -1218,7 +1340,7 @@ local function scanAllIconDirs(mode)
 end
 
 -- ============================================================
--- File icon cache (normal mode uses this to avoid repeated scanning)
+-- File icon cache (for normal mode, avoid repeated scans)
 -- ============================================================
 
 local cached_file_icons = nil
@@ -1257,7 +1379,7 @@ local function resetSystemTempOverrides()
 end
 
 -- ============================================================
--- Icon picker (with grid filtering, auto-recalculates layout on screen resize)
+-- Icon picker (with grid filtering, auto-recalc layout on screen resize)
 -- ============================================================
 
 local picker_cache = {}
@@ -1280,7 +1402,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
     local dialog = nil
     local cur_page = 1
 
-    -- Filter related variables
+    -- Filtering related variables
     local filter_keyword = ""
     local filtered_icons_list = nil
     local search_dialog = nil
@@ -1295,8 +1417,12 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             local pattern = filter_keyword:lower()
             for _, icon in ipairs(icons_list) do
                 local match = false
+
                 if icon.type == "nerd" then
                     if icon.hex:lower():find(pattern, 1, true) then
+                        match = true
+                    end
+                    if icon.name and icon.name:lower():find(pattern, 1, true) then
                         match = true
                     end
                 else
@@ -1306,6 +1432,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         match = true
                     end
                 end
+
                 if match then
                     table.insert(filtered_icons_list, icon)
                 end
@@ -1399,16 +1526,27 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         end
     end
 
-    -- Show search dialog
     local function showSearchDialog()
         if search_dialog then
             UIManager:close(search_dialog)
             search_dialog = nil
         end
+
+        -- Triggers on each keystroke
+        local function onStrike()
+            if search_dialog then
+                filter_keyword = search_dialog:getInputText() or ""
+                filtered_icons_list = nil
+                rebuildPicker()
+                UIManager:setDirty(dialog, function() return "ui", dialog.dimen end)
+            end
+        end
+
         search_dialog = InputDialog:new{
             title = _("Filter icons"),
             input = filter_keyword,
-            input_hint = _("Enter name or codepoint..."),
+            input_hint = _("Enter name or code point..."),
+            strike_callback = onStrike,  -- Triggers on each keystroke
             buttons = {
                 {
                     {
@@ -1417,25 +1555,16 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             UIManager:close(search_dialog)
                             search_dialog = nil
                             filter_keyword = ""
+                            filtered_icons_list = nil
                             rebuildPicker()
+                            UIManager:setDirty(dialog, function() return "ui", dialog.dimen end)
                         end,
                     },
                     {
-                        text = _("Cancel"),
+                        text = _("Close"),
                         callback = function()
                             UIManager:close(search_dialog)
                             search_dialog = nil
-                        end,
-                    },
-                    {
-                        text = _("OK"),
-                        is_enter_default = true,
-                        callback = function()
-                            local input = search_dialog:getInputText() or ""
-                            filter_keyword = input
-                            UIManager:close(search_dialog)
-                            search_dialog = nil
-                            rebuildPicker()
                         end,
                     },
                 }
@@ -1492,70 +1621,13 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             icons_list = {}
 
             if (not filter or filter == "nerd") and mode ~= "system" then
-                local nerd_icons = {
-                    { hex = "002B" }, { hex = "0041" }, { hex = "2328" }, { hex = "2610" },
-                    { hex = "2611" }, { hex = "270D" }, { hex = "5B57" }, { hex = "6587" },
-                    { hex = "E001" }, { hex = "E002" }, { hex = "E003" }, { hex = "E008" },
-                    { hex = "E20E" }, { hex = "E22B" }, { hex = "E22C" }, { hex = "E22F" },
-                    { hex = "E24B" }, { hex = "E256" }, { hex = "E26E" }, { hex = "E2A8" },
-                    { hex = "E310" }, { hex = "E312" }, { hex = "E33A" }, { hex = "E33B" },
-                    { hex = "E33C" }, { hex = "E33D" }, { hex = "E615" }, { hex = "E6AD" },
-                    { hex = "E70C" }, { hex = "E70F" }, { hex = "E708" }, { hex = "E73C" },
-                    { hex = "E795" }, { hex = "E7B8" }, { hex = "E83C" }, { hex = "E83D" },
-                    { hex = "E87B" }, { hex = "EAC2" }, { hex = "EAC3" }, { hex = "EB5C" },
-                    { hex = "EBB0" }, { hex = "ECA8" }, { hex = "ECA9" }, { hex = "ED14" },
-                    { hex = "EDE2" }, { hex = "EEB1" }, { hex = "F002" }, { hex = "F004" },
-                    { hex = "F005" }, { hex = "F006" }, { hex = "F007" }, { hex = "F008" },
-                    { hex = "F00A" }, { hex = "F00B" }, { hex = "F00C" }, { hex = "F00D" },
-                    { hex = "F011" }, { hex = "F013" }, { hex = "F015" }, { hex = "F017" },
-                    { hex = "F019" }, { hex = "F01D" }, { hex = "F01E" }, { hex = "F021" },
-                    { hex = "F023" }, { hex = "F026" }, { hex = "F027" }, { hex = "F028" },
-                    { hex = "F029" }, { hex = "F02A" }, { hex = "F02B" }, { hex = "F02C" },
-                    { hex = "F02D" }, { hex = "F02E" }, { hex = "F030" }, { hex = "F031" },
-                    { hex = "F03D" }, { hex = "F03E" }, { hex = "F040" }, { hex = "F044" },
-                    { hex = "F048" }, { hex = "F04B" }, { hex = "F04C" }, { hex = "F059" },
-                    { hex = "F05A" }, { hex = "F060" }, { hex = "F061" }, { hex = "F062" },
-                    { hex = "F063" }, { hex = "F067" }, { hex = "F068" }, { hex = "F06A" },
-                    { hex = "F06E" }, { hex = "F070" }, { hex = "F071" }, { hex = "F072" },
-                    { hex = "F073" }, { hex = "F074" }, { hex = "F079" }, { hex = "F07A" },
-                    { hex = "F07B" }, { hex = "F07C" }, { hex = "F085" }, { hex = "F086" },
-                    { hex = "F08A" }, { hex = "F08B" }, { hex = "F08E" }, { hex = "F093" },
-                    { hex = "F095" }, { hex = "F09C" }, { hex = "F09E" }, { hex = "F0A0" },
-                    { hex = "F0A9" }, { hex = "F0AA" }, { hex = "F0AB" }, { hex = "F0AC" },
-                    { hex = "F0AD" }, { hex = "F0B0" }, { hex = "F0B2" }, { hex = "F0C0" },
-                    { hex = "F0C1" }, { hex = "F0C2" }, { hex = "F0C5" }, { hex = "F0CA" },
-                    { hex = "F0CE" }, { hex = "F0D0" }, { hex = "F0D2" }, { hex = "F0DE" },
-                    { hex = "F0E0" }, { hex = "F0E2" }, { hex = "F0EA" }, { hex = "F0EB" },
-                    { hex = "F0EC" }, { hex = "F0ED" }, { hex = "F0EE" }, { hex = "F0F2" },
-                    { hex = "F0F3" }, { hex = "F0F6" }, { hex = "F0FE" }, { hex = "F104" },
-                    { hex = "F105" }, { hex = "F106" }, { hex = "F107" }, { hex = "F108" },
-                    { hex = "F109" }, { hex = "F10B" }, { hex = "F112" }, { hex = "F115" },
-                    { hex = "F11B" }, { hex = "F11C" }, { hex = "F120" }, { hex = "F121" },
-                    { hex = "F122" }, { hex = "F123" }, { hex = "F125" }, { hex = "F126" },
-                    { hex = "F127" }, { hex = "F12E" }, { hex = "F130" }, { hex = "F131" },
-                    { hex = "F135" }, { hex = "F13E" }, { hex = "F140" }, { hex = "F142" },
-                    { hex = "F143" }, { hex = "F14A" }, { hex = "F14C" }, { hex = "F15B" },
-                    { hex = "F16C" }, { hex = "F185" }, { hex = "F186" }, { hex = "F187" },
-                    { hex = "F18C" }, { hex = "F19B" }, { hex = "F19C" }, { hex = "F1AC" },
-                    { hex = "F1B2" }, { hex = "F1B8" }, { hex = "F1C0" }, { hex = "F1C1" },
-                    { hex = "F1C2" }, { hex = "F1C3" }, { hex = "F1C4" }, { hex = "F1C5" },
-                    { hex = "F1C6" }, { hex = "F1C7" }, { hex = "F1C8" }, { hex = "F1C9" },
-                    { hex = "F1CA" }, { hex = "F1CD" }, { hex = "F1CE" }, { hex = "F1D8" },
-                    { hex = "F1D9" }, { hex = "F1DA" }, { hex = "F1DC" }, { hex = "F1E4" },
-                    { hex = "F1E6" }, { hex = "F1E7" }, { hex = "F1F4" }, { hex = "F1F8" },
-                    { hex = "F1FC" }, { hex = "F233" }, { hex = "F236" }, { hex = "F240" },
-                    { hex = "F245" }, { hex = "F25A" }, { hex = "F282" }, { hex = "F287" },
-                    { hex = "F28B" }, { hex = "F28D" }, { hex = "F291" }, { hex = "F29C" },
-                    { hex = "F2A9" }, { hex = "F2B9" }, { hex = "F2BE" }, { hex = "F2DB" },
-                    { hex = "F303" }, { hex = "F405" }, { hex = "F435" }, { hex = "F44C" },
-                    { hex = "F45D" }, { hex = "F45E" }, { hex = "F45F" }, { hex = "F46B" },
-                    { hex = "F46D" }, { hex = "F46E" }, { hex = "F487" }, { hex = "F492" },
-                }
+                local nerd_icons = getNerdIcons()
                 for _, icon in ipairs(nerd_icons) do
                     table.insert(icons_list, {
                         type = "nerd",
                         hex = icon.hex,
                         value = "nerd:" .. icon.hex,
+                        name = icon.name,
                     })
                 end
             end
@@ -1591,14 +1663,11 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         end
 
         -- Recalculate layout
-        -- Choose different row/column counts based on orientation
         if sw > sh then
-            -- Landscape
             cols = 9
             rows = 4
             frame_h = math.floor(sh * 0.85)
         else
-            -- Portrait
             cols = 7
             rows = 5
             frame_h = math.floor(sh * 0.70)
@@ -1695,7 +1764,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             page_widgets[p] = page_vg
         end
 
-        -- Cache full data (including screen size and layout)
+        -- Cache full data
         if mode ~= "system" then
             picker_cache[cache_key] = {
                 icons_list = icons_list,
@@ -1754,11 +1823,11 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                 setTable("qa_icon_overrides", {})
                 picker_cache = {}
                 UIManager:show(Notification:new{
-                    text = _("All icons reset, restart required"),
+                    text = _("All icons have been reset, restart to take effect"),
                     timeout = 2,
                 })
                 UIManager:show(ConfirmBox:new{
-                    text = _("Restart required. Restart now?"),
+                    text = _("Restart required to take effect. Restart now?"),
                     ok_text = _("Restart"),
                     cancel_text = _("Later"),
                     ok_callback = function()
@@ -1775,7 +1844,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             callback = function()
                 if replaced == 0 then
                     UIManager:show(InfoMessage:new{
-                        text = _("No replaced icons to apply"),
+                        text = _("No replacements to apply"),
                         timeout = 2,
                     })
                     return
@@ -1797,7 +1866,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                     timeout = 2,
                 })
                 UIManager:show(ConfirmBox:new{
-                    text = _("Restart required. Restart now?"),
+                    text = _("Restart required to take effect. Restart now?"),
                     ok_text = _("Restart"),
                     cancel_text = _("Later"),
                     ok_callback = function()
@@ -1815,7 +1884,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         }
     else
         local btn_width = math.floor(content_w / 4) - 5
-        local show_more_btn = not filter or filter == "nerd"
         local show_browse_btn = not filter or filter == "file"
 
         local apply_default_btn = Button:new{
@@ -1842,19 +1910,20 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             end,
         }
 
-        local more_btn
-        if show_more_btn then
-            more_btn = Button:new{
-                text = _("More Nerd Fonts"),
-                width = btn_width,
-                show_parent = nil,
-                callback = function()
-                    UIManager:close(dialog)
-                    UIManager:setDirty("all", "full")
-                    showNerdIconInput(nil, on_select, saved_icon)
-                end,
-            }
-        end
+        local toggle_btn = Button:new{
+            text = (filter == "file") and _("Show all icons") or _("Show file icons only"),
+            width = btn_width,
+            show_parent = nil,
+            callback = function()
+                UIManager:close(dialog)
+                UIManager:setDirty("all", "full")
+                if filter == "file" then
+                    showIconPicker(on_select, saved_icon, nil)
+                else
+                    showIconPicker(on_select, saved_icon, "file")
+                end
+            end,
+        }
 
         local browse_btn
         if show_browse_btn then
@@ -1879,10 +1948,8 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         local btn_row_children = { apply_default_btn }
         table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
         table.insert(btn_row_children, refresh_btn)
-        if show_more_btn then
-            table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
-            table.insert(btn_row_children, more_btn)
-        end
+        table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
+        table.insert(btn_row_children, toggle_btn)
         if show_browse_btn then
             table.insert(btn_row_children, HorizontalSpan:new{ width = 8 })
             table.insert(btn_row_children, browse_btn)
@@ -1941,13 +2008,13 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         return true
                     end
 
-                    -- Button row tap
+                    -- Button row click
                     local btn_y = frame_y + pad + title_bar_h
                     if gy >= btn_y and gy < btn_y + button_bar_h then
                         if mode == "system" then
-                            local btn_width = math.floor(content_w / 2) - 4
+                            local btn_width_sys = math.floor(content_w / 2) - 4
                             local btn_x_start = frame_x + pad
-                            if gx >= btn_x_start and gx < btn_x_start + btn_width then
+                            if gx >= btn_x_start and gx < btn_x_start + btn_width_sys then
                                 local all_overrides = getTable("qa_icon_overrides")
                                 local replaced = 0
                                 for _, item in ipairs(icons_list) do
@@ -1968,11 +2035,11 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                 setTable("qa_icon_overrides", {})
                                 picker_cache = {}
                                 UIManager:show(Notification:new{
-                                    text = _("All icons reset, restart required"),
+                                    text = _("All icons have been reset, restart to take effect"),
                                     timeout = 2,
                                 })
                                 UIManager:show(ConfirmBox:new{
-                                    text = _("Restart required. Restart now?"),
+                                    text = _("Restart required to take effect. Restart now?"),
                                     ok_text = _("Restart"),
                                     cancel_text = _("Later"),
                                     ok_callback = function()
@@ -1981,7 +2048,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                 })
                                 return true
                             end
-                            if gx >= btn_x_start + btn_width + 8 and gx < btn_x_start + (btn_width + 8) * 2 then
+                            if gx >= btn_x_start + btn_width_sys + 8 and gx < btn_x_start + (btn_width_sys + 8) * 2 then
                                 local all_overrides = getTable("qa_icon_overrides")
                                 local replaced = 0
                                 for _, item in ipairs(icons_list) do
@@ -1991,7 +2058,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                 end
                                 if replaced == 0 then
                                     UIManager:show(InfoMessage:new{
-                                        text = _("No replaced icons to apply"),
+                                        text = _("No replacements to apply"),
                                         timeout = 2,
                                     })
                                     return true
@@ -2015,7 +2082,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                     timeout = 2,
                                 })
                                 UIManager:show(ConfirmBox:new{
-                                    text = _("Restart required. Restart now?"),
+                                    text = _("Restart required to take effect. Restart now?"),
                                     ok_text = _("Restart"),
                                     cancel_text = _("Later"),
                                     ok_callback = function()
@@ -2030,6 +2097,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             local current_btn_width = math.floor(content_w / 4) - 5
                             local btn_index = 0
 
+                            -- Apply default
                             if gx >= btn_x_start and gx < btn_x_start + current_btn_width then
                                 UIManager:close(self)
                                 UIManager:setDirty("all", "full")
@@ -2038,6 +2106,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
+                            -- Refresh
                             local x_start = btn_x_start + (current_btn_width + 8) * btn_index
                             if gx >= x_start and gx < x_start + current_btn_width then
                                 clearFileIconsCache()
@@ -2049,19 +2118,23 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
-                            if not filter or filter == "nerd" then
-                                local x_start = btn_x_start + (current_btn_width + 8) * btn_index
-                                if gx >= x_start and gx < x_start + current_btn_width then
-                                    UIManager:close(self)
-                                    UIManager:setDirty("all", "full")
-                                    showNerdIconInput(nil, on_select, saved_icon)
-                                    return true
+                            -- Toggle button (all/custom)
+                            x_start = btn_x_start + (current_btn_width + 8) * btn_index
+                            if gx >= x_start and gx < x_start + current_btn_width then
+                                UIManager:close(self)
+                                UIManager:setDirty("all", "full")
+                                if filter == "file" then
+                                    showIconPicker(on_select, saved_icon, nil)
+                                else
+                                    showIconPicker(on_select, saved_icon, "file")
                                 end
-                                btn_index = btn_index + 1
+                                return true
                             end
+                            btn_index = btn_index + 1
 
+                            -- Browse files
                             if not filter or filter == "file" then
-                                local x_start = btn_x_start + (current_btn_width + 8) * btn_index
+                                x_start = btn_x_start + (current_btn_width + 8) * btn_index
                                 if gx >= x_start and gx < x_start + current_btn_width then
                                     UIManager:close(self)
                                     UIManager:setDirty("all", "full")
@@ -2082,7 +2155,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                     -- Bottom pagination
                     local bar_y = frame_y + pad + title_bar_h + button_bar_h + grid_h
                     if gy >= bar_y and gy < bar_y + footer_h then
-                        local chev_w = 80
+                        local chev_w = 120
                         if gx < frame_x + pad + chev_w then
                             if cur_page > 1 then
                                 cur_page = cur_page - 1
@@ -2095,11 +2168,49 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                 UIManager:setDirty(self, function() return "ui", self.dimen end)
                             end
                             return true
+                        else
+                            -- Middle area: pop up input dialog to jump to a specific page
+                            local dlg
+                            dlg = InputDialog:new{
+                                title = _("Go to page"),
+                                input = tostring(cur_page),
+                                input_hint = string.format("1 - %d", total_pages),
+                                input_type = "number",
+                                buttons = {
+                                    {
+                                        {
+                                            text = _("Cancel"),
+                                            callback = function()
+                                                UIManager:close(dlg)
+                                            end,
+                                        },
+                                        {
+                                            text = _("Go"),
+                                            is_enter_default = true,
+                                            callback = function()
+                                                local page = tonumber(dlg:getInputText())
+                                                if page and page >= 1 and page <= total_pages then
+                                                    cur_page = page
+                                                    UIManager:close(dlg)
+                                                    UIManager:setDirty(self, function() return "ui", self.dimen end)
+                                                else
+                                                    UIManager:show(InfoMessage:new{
+                                                        text = string.format(_("Please enter a number between 1 and %d"), total_pages),
+                                                        timeout = 2,
+                                                    })
+                                                end
+                                            end,
+                                        },
+                                    }
+                                },
+                            }
+                            UIManager:show(dlg)
+                            pcall(function() dlg:onShowKeyboard() end)
+                            return true
                         end
-                        return true
                     end
 
-                    -- Grid tap
+                    -- Grid click
                     local grid_start_x = frame_x + pad + (content_w - grid_w) / 2
                     local grid_y = frame_y + pad + title_bar_h + button_bar_h
                     if gx >= grid_start_x and gx < grid_start_x + grid_w
@@ -2270,7 +2381,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
 end
 
 -- ============================================================
--- Menu path recorder
+-- Menu path recorder (kept as-is)
 -- ============================================================
 
 local _pick_state = {
@@ -2366,7 +2477,7 @@ end
 local function _makeActionBar(menu)
     local buttons = {}
     table.insert(buttons, Button:new{
-        text = _("Save recording as quick action"),
+        text = _("Finish recording and save as quick action"),
         width = menu.item_width,
         text_font_bold = true,
         bordersize = Size.border.thin,
@@ -2581,7 +2692,7 @@ local function replayPath(menu, path_record)
 end
 
 -- ============================================================
--- Action execution
+-- Action execution (kept as-is)
 -- ============================================================
 
 local ACTION_REGISTRY = {}
@@ -2616,7 +2727,7 @@ local function executePluginAction(plugin_key, plugin_method)
     
     if not plugin_inst then
         UIManager:show(InfoMessage:new{
-            text = string.format(_("Plugin unavailable: %s"), plugin_key),
+            text = string.format(_("Plugin not available: %s"), plugin_key),
             timeout = 2,
         })
         return
@@ -2629,7 +2740,7 @@ local function executePluginAction(plugin_key, plugin_method)
         pcall(plugin_inst[plugin_method], plugin_inst)
     else
         UIManager:show(InfoMessage:new{
-            text = string.format(_("Plugin method unavailable: %s.%s"), plugin_key, plugin_method),
+            text = string.format(_("Plugin method not available: %s.%s"), plugin_key, plugin_method),
             timeout = 2,
         })
     end
@@ -2733,14 +2844,14 @@ local function executeMenuAction(menu_path, ctx)
     else
         local msg = (recorded_view == "reader") 
             and _("This quick action can only be executed in the reader. Please open a book first.")
-            or _("This quick action can only be executed in the file browser.")
+            or _("This quick action can only be executed in the file manager.")
         UIManager:show(InfoMessage:new{ text = msg, timeout = 3 })
         return
     end
 end
 
 -- ============================================================
--- Action retrieval and registration
+-- Action retrieval and registration (kept as-is)
 -- ============================================================
 
 local function getAction(id)
@@ -2878,7 +2989,7 @@ local function registerAction(id, label, icon, is_in_place, view, execute_fn)
 end
 
 -- ============================================================
--- Register built-in actions (to delete, simply remove the corresponding registration code)
+-- Register built-in actions (delete corresponding registration code to remove)
 -- ============================================================
 
 -- Built-in system quick actions
@@ -2915,11 +3026,11 @@ registerAction("night", _("Night mode"), "nerd:F186", true, "common", function(c
     UIManager:setDirty("all", "full")
 end)
 
-registerAction("rotate", _("Rotate"), "nerd:EB4D", true, "common", function(ctx)
+registerAction("rotate", _("Rotate"), "nerd:E8BC", true, "common", function(ctx)
     UIManager:broadcastEvent(require("ui/event"):new("SwapRotation"))
 end)
 
-registerAction("screenshot", _("Screenshot (4s delay)"), "nerd:F030", false, "common", function(ctx)
+registerAction("screenshot", _("Screenshot (4s delay)"), "nerd:E7FF", false, "common", function(ctx)
     local function showCountdown(num)
         UIManager:show(Notification:new{
             text = tostring(num),
@@ -3010,7 +3121,7 @@ registerAction("power", _("Power"), "nerd:F011", true, "common", function(ctx)
     UIManager:show(ButtonDialog:new{ width = math.floor(Screen:getWidth() * 0.42), buttons = buttons })
 end)
 
-registerAction("httpinspector", _("HTTP server"), "nerd:F44C", true, "common", function()
+registerAction("httpinspector", _("HTTP Server"), "nerd:E701", true, "common", function()
     local ui = require("apps/reader/readerui").instance
     if not ui then
         local FM = require("apps/filemanager/filemanager")
@@ -3032,7 +3143,7 @@ registerAction("httpinspector", _("HTTP server"), "nerd:F44C", true, "common", f
         end
     else
         UIManager:show(InfoMessage:new{
-            text = _("httpinspector plugin instance not found. Please check if the plugin is installed or modify the action registration to accommodate the updated plugin."),
+            text = _("httpinspector plugin instance not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
             timeout = 2,
         })
     end
@@ -3119,11 +3230,11 @@ registerAction("fontlist", _("Font list"), "nerd:F031", false, "reader", functio
     UIManager:show(font_dialog)
 end)
 
-registerAction("qa_settings", _("Quick Actions Settings"), "nerd:F0CA", false, "common", function(ctx)
+registerAction("qa_settings", _("Quick Actions Settings"), "nerd:E73A", false, "common", function(ctx)
     showSettingsMenu()
 end)
 
-registerAction("qa_new", _("New quick action"), "nerd:F067", false, "common", function()
+registerAction("qa_new", _("New Quick Action"), "nerd:F067", false, "common", function()
     showCustomQADialog(nil, function()
         local FM = require("apps/filemanager/filemanager")
         local fm = FM and FM.instance
@@ -3138,12 +3249,13 @@ registerAction("qa_new", _("New quick action"), "nerd:F067", false, "common", fu
     end)
 end)
 
--- UI font switcher
-registerAction("ui_font_switch", _("Switch UI font"), "nerd:5B57", true, "common", function(ctx)
+
+-- UI Font Switcher
+registerAction("ui_font_switch", _("Switch UI Font"), "nerd:F30B", true, "common", function(ctx)
     showUIFontSwitcher()
 end)
 
-registerAction("qa_add_button", _("Add button"), "nerd:F055", false, "common", function()
+registerAction("qa_add_button", _("Add Button"), "nerd:F055", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local touch_menu = nil
@@ -3159,10 +3271,11 @@ registerAction("qa_add_button", _("Add button"), "nerd:F055", false, "common", f
     showAddButtonMenu(touch_menu)
 end)
 
+
 -- Built-in external plugin and patch quick actions
 
 -- Patch: 2-fm-cover.lua (cover visual settings)
-registerAction("fmcoversettings", _("Cover visual settings"), "nerd:E22F", false, "filemanager", function()
+registerAction("fmcoversettings", _("Cover Visual Settings"), "nerd:E8C8", false, "filemanager", function()
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     if reader then
@@ -3178,7 +3291,7 @@ registerAction("fmcoversettings", _("Cover visual settings"), "nerd:E22F", false
 end)
 
 -- Patch: 2-reader-clozemode.lua (cloze mode)
-registerAction("toggle_cloze_mode", _("Cloze mode"), "nerd:F040", false, "reader", function(ctx)
+registerAction("toggle_cloze_mode", _("Cloze Mode"), "nerd:F040", false, "reader", function(ctx)
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     
@@ -3222,14 +3335,14 @@ registerAction("filebrowserplus", _("FilebrowserPlus"), "nerd:F029", true, "comm
         end
     else
         UIManager:show(InfoMessage:new{
-            text = _("filebrowserplus plugin instance or method not found. Please check if the plugin is installed or modify the action registration to accommodate the updated plugin."),
+            text = _("filebrowserplus plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
             timeout = 2,
         })
     end
 end)
 
 -- Plugin: zlibrary.koplugin
-registerAction("zlibrary_search", _("ZLibrary search"), "nerd:005A", false, "common", function()
+registerAction("zlibrary_search", _("ZLibrary Search"), "nerd:F494", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
@@ -3244,14 +3357,14 @@ registerAction("zlibrary_search", _("ZLibrary search"), "nerd:005A", false, "com
         plugin:onZlibrarySearch()
     else
         UIManager:show(InfoMessage:new{
-            text = _("zlibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration to accommodate the updated plugin."),
+            text = _("zlibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
             timeout = 2,
         })
     end
 end)
 
 -- Plugin: cloudlibrary.koplugin
-registerAction("cloudlibrary_autosync", _("CloudLibrary - Auto sync"), "nerd:E33B", false, "common", function()
+registerAction("cloudlibrary_autosync", _("CloudLibrary - Auto Sync"), "nerd:E33B", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
@@ -3266,14 +3379,14 @@ registerAction("cloudlibrary_autosync", _("CloudLibrary - Auto sync"), "nerd:E33
         plugin:toggleAutoSyncQuick()
     else
         UIManager:show(InfoMessage:new{
-            text = _("cloudLibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration to accommodate the updated plugin."),
+            text = _("CloudLibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
             timeout = 2,
         })
     end
 end)
 
 -- Plugin: cloudlibrary.koplugin
-registerAction("cloudlibrary_batch_download_books", _("CloudLibrary - Batch download/delete"), "nerd:E33A", false, "common", function()
+registerAction("cloudlibrary_batch_download_books", _("CloudLibrary - Batch Download/Delete"), "nerd:F409", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
@@ -3288,7 +3401,7 @@ registerAction("cloudlibrary_batch_download_books", _("CloudLibrary - Batch down
         plugin:batchDownloadBooks()
     else
         UIManager:show(InfoMessage:new{
-            text = _("cloudLibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration to accommodate the updated plugin."),
+            text = _("CloudLibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
             timeout = 2,
         })
     end
@@ -3314,7 +3427,7 @@ registerAction("cloudlibrary_settings", _("CloudLibrary - Settings"), "nerd:E33D
         end
     else
         UIManager:show(InfoMessage:new{
-            text = _("cloudLibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration to accommodate the updated plugin."),
+            text = _("CloudLibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
             timeout = 2,
         })
     end
@@ -3340,7 +3453,7 @@ registerAction("annotations_viewer", _("Annotations Viewer"), "nerd:F040", false
     
     if not has_plugin then
         UIManager:show(InfoMessage:new{
-            text = _("annotationsviewer plugin not installed"),
+            text = _("annotationsviewer plugin is not installed"),
             timeout = 2,
         })
         return
@@ -3355,7 +3468,7 @@ registerAction("annotations_viewer", _("Annotations Viewer"), "nerd:F040", false
 end)
 
 -- ============================================================
--- Interface-specific configuration (view management)
+-- View-specific configuration (view management)
 -- ============================================================
 
 local function isMenuAction(action_id)
@@ -3694,12 +3807,12 @@ local function getPluginsList()
     local known = {
         -- FM plugins
         { key = "history", method = "onShowHist", title = _("History"), source = "fm" },
-        { key = "collections", method = "onShowCollList", title = _("Collections list"), source = "fm" },
-        { key = "filesearcher", method = "onShowFileSearch", title = _("File search"), source = "fm" },
+        { key = "collections", method = "onShowCollList", title = _("Collections List"), source = "fm" },
+        { key = "filesearcher", method = "onShowFileSearch", title = _("File Search"), source = "fm" },
         { key = "dictionary", method = "onShowDictionaryLookup", title = _("Dictionary"), source = "fm" },
-        { key = "folder_shortcuts", method = "onShowFolderShortcutsDialog", title = _("Folder shortcuts"), source = "fm" },
-        { key = "bookinfo", method = "onShowBookInfo", title = _("Book info"), source = "fm" },
-        { key = "wikipedia", method = "onShowWikipediaLookup", title = _("Wikipedia lookup"), source = "fm" },
+        { key = "folder_shortcuts", method = "onShowFolderShortcutsDialog", title = _("Folder Shortcuts"), source = "fm" },
+        { key = "bookinfo", method = "onShowBookInfo", title = _("Book Info"), source = "fm" },
+        { key = "wikipedia", method = "onShowWikipediaLookup", title = _("Wikipedia Lookup"), source = "fm" },
         -- ReaderUI plugins
         { key = "bookmark", method = "onShowBookmarks", title = _("Bookmarks"), source = "reader" },
         { key = "highlight", method = "onShowHighlights", title = _("Highlights"), source = "reader" },
@@ -3722,7 +3835,7 @@ local function getPluginsList()
         end
     end
     
-    -- 2. Dynamically scan FM plugins
+    -- 2. Dynamic scan of FM plugins
     if fm then
         local native_keys = {
             screenshot=true, menu=true, history=true, bookinfo=true, collections=true,
@@ -3756,7 +3869,7 @@ local function getPluginsList()
         end
     end
     
-    -- 3. Dynamically scan ReaderUI plugins
+    -- 3. Dynamic scan of ReaderUI plugins
     if reader then
         local reader_native_keys = {
             menu=true, bookmark=true, highlight=true, search=true,
@@ -3816,8 +3929,8 @@ local function getDispatcherActions()
     local sections = {
         { key = "general",     title = _("General") },
         { key = "device",      title = _("Device") },
-        { key = "screen",      title = _("Screen and lighting") },
-        { key = "filemanager", title = _("File browser") },
+        { key = "screen",      title = _("Screen & Lighting") },
+        { key = "filemanager", title = _("File Manager") },
         { key = "reader",      title = _("Reader") },
         { key = "rolling",     title = _("Re-flowable documents (epub, fb2, txt…)") },
         { key = "paging",      title = _("Fixed-layout documents (pdf, djvu, images…)") },
@@ -3855,7 +3968,7 @@ local function getDispatcherActions()
 end
 
 -- ============================================================
--- Delete and remove functions
+-- Delete and removal functions
 -- ============================================================
 
 local function deleteCustomQA(qa_id)
@@ -3886,7 +3999,7 @@ function removeFromPanel(action_id, touch_menu)
     end
     if not found then
         UIManager:show(Notification:new{
-            text = _("Button not found in quick actions tab"),
+            text = _("This button is not in the quick actions tab"),
             timeout = 2,
         })
         return false
@@ -3908,7 +4021,7 @@ local function showMenu(items, title, parent_stack, touch_menu, root_items)
         if #parent_stack > 1 then
             table.insert(buttons, {
                 {
-                    text = "◂◂ " .. _("Return to root menu"),
+                    text = "◂◂ " .. _("Back to root menu"),
                     callback = function()
                         closeSettingsDialog()
                         showMenu(root_items, _("Quick Actions Settings"), nil, touch_menu, root_items)
@@ -4017,7 +4130,7 @@ local function showEditActionDialog(action_id, on_done)
     local view_options = { "common", "filemanager", "reader" }
     local view_labels = {
         common = _("General"),
-        filemanager = _("File manager"),
+        filemanager = _("File Manager"),
         reader = _("Reader"),
     }
 
@@ -4050,7 +4163,7 @@ local function showEditActionDialog(action_id, on_done)
         end
 
         local function viewButtonText()
-            return _("Interface") .. ": " .. view_labels[current_view]
+            return _("Context") .. ": " .. view_labels[current_view]
         end
 
         local fields = {
@@ -4081,7 +4194,7 @@ local function showEditActionDialog(action_id, on_done)
             if on_done then on_done() end
         end })
 
-        -- Move left: show if pos exists, grayed out if pos=1
+        -- Move left
         if pos then
             table.insert(last_row, { text = "◀", enabled = (pos > 1), callback = function()
                 if active_dialog then
@@ -4108,7 +4221,7 @@ local function showEditActionDialog(action_id, on_done)
             end })
         end
 
-        -- Position button: show if pos exists, tap to open reorder dialog
+        -- Position button
         if pos then
             table.insert(last_row, { text = pos .. "/" .. total, callback = function()
                 UIManager:close(active_dialog)
@@ -4119,7 +4232,7 @@ local function showEditActionDialog(action_id, on_done)
                     sort_items[#sort_items + 1] = { text = getLabelForAction(id), orig_item = id }
                 end
                 local sort_dialog = SortWidget:new{
-                    title = _("Reorder buttons"),
+                    title = _("Arrange Buttons"),
                     item_table = sort_items,
                     covers_fullscreen = true,
                     callback = function()
@@ -4135,7 +4248,7 @@ local function showEditActionDialog(action_id, on_done)
             end })
         end
 
-        -- Move right: show if pos exists, grayed out if pos=total
+        -- Move right
         if pos then
             table.insert(last_row, { text = "▶", enabled = (pos < total), callback = function()
                 if active_dialog then
@@ -4227,7 +4340,7 @@ local function showEditActionDialog(action_id, on_done)
                     end,
                 }})
                 view_dialog = ButtonDialog:new{
-                    title = _("Select interface"),
+                    title = _("Select context"),
                     title_align = "center",
                     buttons = view_buttons,
                 }
@@ -4237,7 +4350,7 @@ local function showEditActionDialog(action_id, on_done)
         }
 
         active_dialog = MultiInputDialog:new{
-            title = _("Edit quick action"),
+            title = _("Edit Quick Action"),
             fields = fields,
             tap_close_callback = function()
                 UIManager:close(active_dialog)
@@ -4394,7 +4507,7 @@ function showAddButtonMenu(touch_menu, on_back)
     local show_slider_val = showSliderValue()
     table.insert(buttons, {
         {
-            text = (show_slider_val and "✓ " or "  ") .. _("Show slider value"),
+            text = (show_slider_val and "✓ " or "  ") .. _("Show slider values"),
             callback = function()
                 setBool("qa_slider_show_value", not showSliderValue())
                 if touch_menu then touch_menu:updateItems() end
@@ -4424,7 +4537,7 @@ function showAddButtonMenu(touch_menu, on_back)
                 local new_slots = {}
                 
                 if is_all_checked then
-                    -- Deselect all: only keep buttons not in available (e.g., frontlight, warmth)
+                    -- Deselect all: keep only buttons not in available (e.g., frontlight, warmth)
                     for _, id in ipairs(current_slots) do
                         local is_available = false
                         for _, action in ipairs(available) do
@@ -4438,7 +4551,7 @@ function showAddButtonMenu(touch_menu, on_back)
                         end
                     end
                 else
-                    -- Select all: keep existing buttons, add all unchecked
+                    -- Select all: keep existing, add all unselected
                     for _, id in ipairs(current_slots) do
                         table.insert(new_slots, id)
                     end
@@ -4518,7 +4631,7 @@ function showAddButtonMenu(touch_menu, on_back)
         end }
     })
     local dialog = ButtonDialog:new{
-        title = _("Add button"),
+        title = _("Add Button"),
         title_align = "center",
         buttons = buttons,
         width = math.floor(Screen:getWidth() * 0.7),
@@ -4529,7 +4642,7 @@ function showAddButtonMenu(touch_menu, on_back)
 end
 
 -- ============================================================
--- Interface filter settings menu
+-- Context filter settings menu
 -- ============================================================
 
 function showInterfaceFilterMenu(touch_menu)
@@ -4649,7 +4762,7 @@ function showInterfaceFilterMenu(touch_menu)
             {
                 text = function()
                     local enabled = getBool("qa_context_filter")
-                    return (enabled and "✓ " or "  ") .. _("Enable interface filtering")
+                    return (enabled and "✓ " or "  ") .. _("Enable context filtering")
                 end,
                 close_on_click = false,
                 callback = function()
@@ -4667,7 +4780,7 @@ function showInterfaceFilterMenu(touch_menu)
                             fm = fm + 1
                         end
                     end
-                    return string.format(_("File manager dedicated (%d)"), fm)
+                    return string.format(_("File manager only (%d)"), fm)
                 end,
                 close_on_click = true,
                 sub_item_table = function()
@@ -4683,7 +4796,7 @@ function showInterfaceFilterMenu(touch_menu)
                             rd = rd + 1
                         end
                     end
-                    return string.format(_("Reader dedicated (%d)"), rd)
+                    return string.format(_("Reader only (%d)"), rd)
                 end,
                 close_on_click = true,
                 sub_item_table = function()
@@ -4691,7 +4804,7 @@ function showInterfaceFilterMenu(touch_menu)
                 end,
             },
             {
-                text = _("Reset to default dedication"),
+                text = _("Reset to default dedicated"),
                 close_on_click = true,
                 callback = function()
                     local confirm = ConfirmBox:new{
@@ -4713,7 +4826,7 @@ function showInterfaceFilterMenu(touch_menu)
                             setTable("custom", custom)
                             refreshQuickPanel(touch_menu)
                             UIManager:show(Notification:new{
-                                text = _("Reset to default dedication"),
+                                text = _("Reset to default dedicated settings"),
                                 timeout = 2,
                             })
                         end,
@@ -4730,7 +4843,7 @@ end
 -- Dispatcher helper functions (extracted to reduce upvalues)
 -- ============================================================
 
--- Close Dispatcher dialogs
+-- Close dispatcher dialogs
 local function closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
     if disp_picker then
         UIManager:close(disp_picker)
@@ -4785,7 +4898,7 @@ local function buildConfigurableSubItems(item, def, touch_menu, buildSaveDialog,
         }})
 
         table.insert(sub_items, {{
-            text = "◂◂ " .. _("Back to edit"),
+            text = "◂◂ " .. _("Back to edit dialog"),
             callback = function()
                 if sub_dialog then
                     UIManager:close(sub_dialog)
@@ -4793,8 +4906,7 @@ local function buildConfigurableSubItems(item, def, touch_menu, buildSaveDialog,
                 end
                 if disp_picker then
                     UIManager:close(disp_picker)
-                    disp_picker = nil
-                end
+                    disp_picker = nil                end
                 buildSaveDialog(false)
             end
         }})
@@ -4869,7 +4981,7 @@ function showCustomQADialog(qa_id, on_done)
     local cfg = qa_id and custom[qa_id] or {}
     local start_path = cfg.action_value or (G_reader_settings:readSetting("home_dir") or "/")
     local chosen_icon = cfg.icon
-    local dlg_title = qa_id and _("Edit quick action") or _("New quick action")
+    local dlg_title = qa_id and _("Edit Quick Action") or _("New Quick Action")
     local existing_label = cfg.label or ""
 
     local current_action_type = nil
@@ -4911,14 +5023,14 @@ function showCustomQADialog(qa_id, on_done)
     local view_options = { "common", "filemanager", "reader" }
     local view_labels = {
         common = _("General"),
-        filemanager = _("File manager"),
+        filemanager = _("File Manager"),
         reader = _("Reader"),
     }
     
     local buildSaveDialog
     local openActionPicker
 
-    -- commitQA: menu type does not save view
+    -- Modified: menu type does not save view
     local function commitQA(final_label, path, collection, icon, plugin_key, plugin_method, dispatcher_action, dispatcher_value, menu_path, user_view)
         local list = getSetting("custom_list")
         if type(list) ~= "table" then list = {} end
@@ -5003,7 +5115,7 @@ function showCustomQADialog(qa_id, on_done)
                     saveQASlots(slots)
                 else
                     UIManager:show(InfoMessage:new{
-                        text = string.format(_("Button panel is full (maximum %d), cannot auto-add."), MAX_SLOTS),
+                        text = string.format(_("Button panel is full (max %d), cannot auto-add."), MAX_SLOTS),
                         timeout = 3,
                     })
                 end
@@ -5062,7 +5174,7 @@ function showCustomQADialog(qa_id, on_done)
         end
         
         choice_dialog = ButtonDialog:new{
-            title = _("Action type"),
+            title = _("Action Type"),
             title_align = "center",
             buttons = {
                 {{ text = _("Folder"), callback = function()
@@ -5106,7 +5218,7 @@ function showCustomQADialog(qa_id, on_done)
                         if coll_picker then UIManager:close(coll_picker); coll_picker = nil end
                         openActionPicker()
                     end }}
-                    coll_picker = ButtonDialog:new{ title = _("Select collection"), title_align = "center", buttons = coll_buttons }
+                    coll_picker = ButtonDialog:new{ title = _("Select Collection"), title_align = "center", buttons = coll_buttons }
                     UIManager:show(coll_picker)
                 end }},
                 {{ text = _("Plugin"), callback = function()
@@ -5139,13 +5251,13 @@ function showCustomQADialog(qa_id, on_done)
                         if plugin_picker then UIManager:close(plugin_picker); plugin_picker = nil end
                         openActionPicker()
                     end }}
-                    plugin_picker = ButtonDialog:new{ title = _("Select plugin"), title_align = "center", buttons = plugin_buttons }
+                    plugin_picker = ButtonDialog:new{ title = _("Select Plugin"), title_align = "center", buttons = plugin_buttons }
                     UIManager:show(plugin_picker)
                 end }},
-                {{ text = _("System action"), callback = function()
+                {{ text = _("System Action"), callback = function()
                     openDispatcherPicker()
                 end }},
-                {{ text = _("Record menu action"), callback = function()
+                {{ text = _("Record Menu Action"), callback = function()
                     UIManager:close(choice_dialog)
                     choice_dialog = nil
                     local FM = require("apps/filemanager/filemanager")
@@ -5264,9 +5376,9 @@ function showCustomQADialog(qa_id, on_done)
         local function viewButtonText()
             local is_locked = (current_action_type == "menu")
             if is_locked then
-                return _("Interface") .. ": " .. view_labels[current_view] .. " (" .. _("locked") .. ")"
+                return _("Context") .. ": " .. view_labels[current_view] .. " (" .. _("locked") .. ")"
             else
-                return _("Interface") .. ": " .. view_labels[current_view]
+                return _("Context") .. ": " .. view_labels[current_view]
             end
         end
 
@@ -5368,7 +5480,7 @@ function showCustomQADialog(qa_id, on_done)
                     sort_items[#sort_items + 1] = { text = getLabelForAction(id), orig_item = id }
                 end
                 local sort_dialog = SortWidget:new{
-                    title = _("Reorder buttons"),
+                    title = _("Arrange Buttons"),
                     item_table = sort_items,
                     covers_fullscreen = true,
                     callback = function()
@@ -5444,11 +5556,11 @@ function showCustomQADialog(qa_id, on_done)
             if current_action_type == "plugin" then
                 default_icon = "nerd:F1B2"
             elseif current_action_type == "dispatcher" then
-                default_icon = "nerd:F00A"
+                default_icon = "nerd:E235"
             elseif current_action_type == "menu" then
-                default_icon = "nerd:F28D"
+                default_icon = "nerd:E7FB"
             elseif current_action_type == "collection" then
-                default_icon = "nerd:F006"
+                default_icon = "nerd:E257"
             end
 
             local path, collection, plugin_key, plugin_method, dispatcher_action, dispatcher_value, menu_path
@@ -5510,7 +5622,7 @@ function showCustomQADialog(qa_id, on_done)
                     end,
                 }})
                 view_dialog = ButtonDialog:new{
-                    title = _("Select interface"),
+                    title = _("Select context"),
                     title_align = "center",
                     buttons = view_buttons,
                 }
@@ -5566,7 +5678,7 @@ function showCustomQADialog(qa_id, on_done)
         end
 
         if not settingsList then
-            UIManager:show(InfoMessage:new{ text = _("Unable to get system actions list"), timeout = 3 })
+            UIManager:show(InfoMessage:new{ text = _("Unable to get system action list"), timeout = 3 })
             cancelActionPicker()
             return
         end
@@ -5574,8 +5686,8 @@ function showCustomQADialog(qa_id, on_done)
         local sections = {
             { key = "general",     title = _("General") },
             { key = "device",      title = _("Device") },
-            { key = "screen",      title = _("Screen and lighting") },
-            { key = "filemanager", title = _("File browser") },
+            { key = "screen",      title = _("Screen & Lighting") },
+            { key = "filemanager", title = _("File Manager") },
             { key = "reader",      title = _("Reader") },
             { key = "rolling",     title = _("Re-flowable documents (epub, fb2, txt…)") },
             { key = "paging",      title = _("Fixed-layout documents (pdf, djvu, images…)") },
@@ -5631,7 +5743,7 @@ function showCustomQADialog(qa_id, on_done)
                 }})
 
                 table.insert(action_buttons, {{
-                    text = "◂◂ " .. _("Back to edit"),
+                    text = "◂◂ " .. _("Back to edit dialog"),
                     callback = function()
                         if sub_dialog then
                             UIManager:close(sub_dialog)
@@ -5706,7 +5818,8 @@ function showCustomQADialog(qa_id, on_done)
                                             current_view = "reader"
                                         else
                                             current_view = "common"
-                                        end                                        buildSaveDialog(true)
+                                        end
+                                        buildSaveDialog(true)
                                     end,
                                 }
                                 UIManager:show(spin)
@@ -5775,7 +5888,7 @@ end
         }})
 
         table.insert(final_buttons, {{
-            text = "◂◂ " .. _("Back to edit"),
+            text = "◂◂ " .. _("Back to edit dialog"),
             callback = function()
                 if disp_picker then
                     UIManager:close(disp_picker)
@@ -5803,7 +5916,7 @@ end
         end
 
         disp_picker = ButtonDialog:new{
-            title = _("System action"),
+            title = _("System Actions"),
             title_align = "center",
             buttons = final_buttons,
             width = math.floor(Screen:getWidth() * 0.7),
@@ -5843,7 +5956,7 @@ local function resetAllSettings(touch_menu)
     if f then
         f:write("return " .. serializeTable(new_config))
         f:close()
-        logger.info("[QuickActions] Configuration file rewritten:", CONFIG_PATH)
+        logger.info("[QuickActions] Config file rewritten:", CONFIG_PATH)
     end
     CONFIG_DATA = new_config
     local current_menu = nil
@@ -5860,7 +5973,7 @@ local function resetAllSettings(touch_menu)
     if current_menu and current_menu.updateItems then
         current_menu:updateItems()
     end
-    logger.info("[QuickActions] Configuration reset to default values")
+    logger.info("[QuickActions] Configuration reset to default")
 end
 
 -- ============================================================
@@ -5970,7 +6083,7 @@ local root_menu_items = {
             local new_val = not isQAEnabled()
             setBool("qa_enabled", new_val)
             UIManager:show(ConfirmBox:new{
-                text = _("Restart required.\n\nRestart KOReader now?"),
+                text = _("Restart required to take effect.\n\nRestart KOReader now?"),
                 ok_text = _("Restart"),
                 cancel_text = _("Later"),
                 ok_callback = function()
@@ -5994,7 +6107,7 @@ local root_menu_items = {
                        local filename = filename_with_ext:gsub("%.[^%.]+$", "")
                        setString("qa_tab_icon", filename)
                        UIManager:show(ConfirmBox:new{
-                           text = _("Restart KOReader required. Restart now?"),
+                           text = _("Restart KOReader required to take effect. Restart now?"),
                            ok_text = _("Restart"),
                            cancel_text = _("Later"),
                            ok_callback = function()
@@ -6017,7 +6130,7 @@ local root_menu_items = {
         end,
     },
     {
-        text = _("UI font switcher"),
+        text = _("UI Font Switcher"),
         close_on_click = true,
         callback = function()
             closeSettingsDialog()
@@ -6025,7 +6138,7 @@ local root_menu_items = {
         end,
     },
     {
-        text = _("Interface filtering"),
+        text = _("Context filtering"),
         sub_item_table = function()
             return showInterfaceFilterMenu(touch_menu)
         end,
@@ -6038,7 +6151,7 @@ local root_menu_items = {
         text = _("Edit buttons"),
         sub_item_table = {
             {
-                text = _("Reorder buttons") .. " ▸",
+                text = _("Arrange buttons") .. " ▸",
                 close_on_click = true, 
                 callback = function()
                     closeSettingsDialog()
@@ -6049,7 +6162,7 @@ local root_menu_items = {
                         sort_items[#sort_items + 1] = { text = getLabelForAction(id), orig_item = id }
                     end
                     local sort_dialog = SortWidget:new{
-                        title = _("Reorder buttons"),
+                        title = _("Arrange Buttons"),
                         item_table = sort_items,
                         covers_fullscreen = true,
                         callback = function()
@@ -6130,18 +6243,18 @@ local root_menu_items = {
         },
     },
     {
-        text = function() return (buttonHoldEdit() and "✓ " or "  ") .. _("Long press button to edit") end,
+        text = function() return (buttonHoldEdit() and "✓ " or "  ") .. _("Long-press button to open edit dialog") end,
         callback = function() 
             setBool("qa_button_hold_edit", not buttonHoldEdit())
             refreshQuickPanel(touch_menu)
         end,
     },
     {
-        text = function() return (settingsOnHold() and "✓ " or "  ") .. _("Long press tab panel for settings") end,
+        text = function() return (settingsOnHold() and "✓ " or "  ") .. _("Long-press tab to open settings") end,
         callback = function() setBool("qa_settings_on_hold", not settingsOnHold()) end,
     },
     {
-        text = _("Save current as default"),
+        text = _("Save current settings as default"),
         close_on_click = true,
         callback = function()
             local json = require("json")
@@ -6170,19 +6283,19 @@ local root_menu_items = {
             }
             setSetting("default_config", default_config)
             UIManager:show(Notification:new{
-                text = _("Current configuration saved as default"),
+                text = _("Current settings saved as default"),
                 timeout = 2,
             })
         end,
     },
     {
-        text = _("Apply default configuration"),
+        text = _("Apply default settings"),
         close_on_click = true,
         callback = function()
             local default_config = getSetting("default_config")
             if not default_config or type(default_config) ~= "table" then
                 UIManager:show(Notification:new{
-                    text = _("No saved default configuration, please save first"),
+                    text = _("No default config saved. Please save first."),
                     timeout = 2,
                 })
                 return
@@ -6216,7 +6329,7 @@ local root_menu_items = {
             applyUIFontChanges()
             refreshQuickPanel(touch_menu)
             UIManager:show(Notification:new{
-                text = _("Default configuration applied"),
+                text = _("Default settings applied"),
                 timeout = 2,
             })
         end,
@@ -6227,7 +6340,7 @@ local root_menu_items = {
         callback = function()
             closeSettingsDialog()
             local confirm = ConfirmBox:new{
-                text = _("Reset all settings to initial defaults?\nThis will clear all custom actions and your saved default configuration."),
+                text = _("Reset all settings to initial defaults?\nThis will clear all custom actions and your saved default config."),
                 ok_text = _("Reset"),
                 cancel_text = _("Cancel"),
                 ok_callback = function()
@@ -6261,7 +6374,7 @@ local root_menu_items = {
 end
 
 -- ============================================================
--- SlimSlider: thin rail slider
+-- SlimSlider: thin track slider
 -- ============================================================
 
 local SlimSlider = Widget:extend{
@@ -6765,7 +6878,7 @@ local function buildQSPanel(touch_menu)
 end
 
 -- ============================================================
--- TouchMenu patches
+-- TouchMenu patch
 -- ============================================================
 
 local TouchMenu = require("ui/widget/touchmenu")
@@ -6914,7 +7027,7 @@ function TouchMenu:onPan(arg, ges_ev)
 end
 
 -- ============================================================
--- Prefer quick action panel
+-- Prioritize quick actions panel display
 -- ============================================================
 
 local function patchFileManagerMenuClose()
@@ -7165,7 +7278,7 @@ end
 local function initDefaultDedicatedLists()
     if getBool("qa_filter_initialized") then return end
     setBool("qa_filter_initialized", true)
-    logger.info("[QuickActions] Dedicated list initialization complete")
+    logger.info("[QuickActions] Initialized dedicated lists")
 end
 
 local function install()
