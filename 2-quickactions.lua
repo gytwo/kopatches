@@ -3252,7 +3252,7 @@ end)
 
 
 --UI字体切换
-registerAction("ui_font_switch", _("切换UI字体"), "nerd:5B57", true, "common", function(ctx)
+registerAction("ui_font_switch", _("切换UI字体"), "nerd:F30B", true, "common", function(ctx)
     showUIFontSwitcher()
 end)
 
@@ -3276,7 +3276,7 @@ end)
 -- 内置外部插件及补丁快捷操作
 
 -- 补丁：2-fm-cover.lua（封面视觉设置）
-registerAction("fmcoversettings", _("封面视觉设置"), "nerd:E22F", false, "filemanager", function()
+registerAction("fmcoversettings", _("封面视觉设置"), "nerd:E8C8", false, "filemanager", function()
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     if reader then
@@ -3387,7 +3387,7 @@ registerAction("cloudlibrary_autosync", _("CloudLibrary-省心同步"), "nerd:E3
 end)
 
 -- 插件：cloudlibrary.koplugin
-registerAction("cloudlibrary_batch_download_books", _("CloudLibrary-批量下载/删除"), "nerd:E33A", false, "common", function()
+registerAction("cloudlibrary_batch_download_books", _("CloudLibrary-批量下载/删除"), "nerd:F409", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
