@@ -303,29 +303,27 @@ Tap **Reset to Default Dedicated** to restore all actions to their default state
 
 ## Icon Picker
 
-QuickActions includes a unified icon picker interface for selecting icons for actions, tabs, and more.
+QuickActions includes a unified icon picker interface for selecting icons for actions, tabs, etc.
 
-- Browse 200+ Nerd Font icons in a grid
+- Browse Nerd Font icons included in koreader system in grid view
 - Automatically scan SVG/PNG files in `koreader/icons/` and system icon directories
-- Support searching by **icon name** or **Nerd Font codepoint**
-- Support browsing to any directory to find icons
-- Support manual entry of Nerd Font hexadecimal codepoints to add icons
+- Search/filter by **icon name** or **Nerd Font codepoint**
+- Jump to a specific page (tap the page number to bring up a jump dialog)
+- Browse and switch to any directory to find icon files
 
-| Mode | Supported Types | Access Trigger |
-|------|-----------------|----------------|
-| **Full Mode** | Nerd Font + SVG/PNG files | Edit action icon, [Create Custom Action](#creating-custom-actions) |
-| **File Mode** | SVG/PNG files only (Nerd Font not supported) | [Settings Menu](#settings-menu) → Tab Icon, [System Icon Replacement](#system-icon-replacement) |
+| Mode | Supported Types | Trigger Entry |
+|------|-----------------|---------------|
+| **Full Mode** | Nerd Font + SVG/PNG files | Edit action icon, [Create custom action](#creating-custom-actions) |
+| **File Mode** | SVG/PNG files only (Nerd Font not supported) | [Settings Menu](#settings-menu) → Tab icon, [System icon replacement](#system-icon-replacement) |
 
-> 💡 **Tab Icon** and **System Icon Replacement** only support SVG/PNG format files; Nerd Font icons are not supported.
+> 💡 **Tab icons** and **System icon replacement** only support SVG/PNG format files, Nerd Font icons are not supported.
 
-![qa-icons](picture/qa-icons.jpg)
-![qa-icons-search](picture/qa-icons-search.jpg)
+![qa-icons-all](picture/qa-icons-all.png)
+![qa-icons-onlyfile](picture/qa-icons-onlyfile.png)
+![qa-icons-search](picture/qa-icons-search.png)
 ![qa-icons-file%20browser](picture/qa-icons-file%20browser.jpg)
-![qa-icons-nerdfont](picture/qa-icons-nerdfont.jpg)
-![qa-icons-nerdfont2](picture/qa-icons-nerdfont2.jpg)
-![qa-icons-nerdfont3](picture/qa-icons-nerdfont3.jpg)
-![qa-icons-rotate-nerdfont](picture/qa-icons-rotate-nerdfont.jpg)
-![qa-icons-rotate-custom](picture/qa-icons-rotate-custom.jpg)
+![qa-icons-rotate-nerdfont](picture/qa-icons-rotate-all.png)
+![qa-icons-rotate-custom](picture/qa-icons-rotate-file.png)
 
 ---
 
