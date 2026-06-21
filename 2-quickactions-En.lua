@@ -3342,7 +3342,7 @@ registerAction("filebrowserplus", _("FilebrowserPlus"), "nerd:F029", true, "comm
 end)
 
 -- Plugin: zlibrary.koplugin
-registerAction("zlibrary_search", _("ZLibrary Search"), "nerd:F494", false, "common", function()
+registerAction("zlibrary_search", _("ZLibrary Search"), "nerd:E76F", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
@@ -4395,7 +4395,7 @@ local function getCustomItems(touch_menu)
         local cfg = getTable("custom")[id]
         if cfg then
             local symbol = getActionSymbol(id)
-            local view_tag = " [" .. (cfg.view or "common") .. "]"
+            local view_tag = " [" .. getActionViewFinal(id) .. "]"
             items[#items + 1] = {
                 id = id,
                 text = symbol .. cfg.label .. view_tag,
@@ -5552,7 +5552,7 @@ function showCustomQADialog(qa_id, on_done)
             UIManager:close(active_dialog)
             active_dialog = nil
 
-            local default_icon = "nerd:F07B"
+            local default_icon = "nerd:F114"
             if current_action_type == "plugin" then
                 default_icon = "nerd:F1B2"
             elseif current_action_type == "dispatcher" then
