@@ -13,6 +13,7 @@
     - 已读书籍变暗
     - 显示页面计数	
     - 显示格式徽章
+    - 封面书名横幅
 
     【文件夹封面】
     - 封面模式：Gallery（4宫格拼贴）/ Stack（堆叠效果）/ Normal（首张封面）/ None（仅文件夹名）
@@ -133,6 +134,27 @@ end
 
 local function setHideUpFolder(value)
     setBool("vc_hide_up_folder", value)
+end
+
+-- 书籍封面横幅配置
+local function getBookBannerConfig()
+    return {
+        show_on_cover = getBool("vc_show_title_on_cover", false),
+        centered = getBool("vc_title_centered", false),
+        opaque = getBool("vc_title_opaque", false),
+    }
+end
+
+local function setBookBannerShow(value)
+    setBool("vc_show_title_on_cover", value)
+end
+
+local function setBookBannerCentered(value)
+    setBool("vc_title_centered", value)
+end
+
+local function setBookBannerOpaque(value)
+    setBool("vc_title_opaque", value)
 end
 
 local function refreshFileManager()
@@ -313,10 +335,10 @@ local function genCover(filepath, target_w, target_h, no_fallback)
     end
 
     if not no_fallback then
-        if title == "" then title = _("Unknown") end
-        if authors == "" then authors = _("Unknown Author") end
+        if title == "" then title = _("未知") end
+        if authors == "" then authors = _("未知作者") end
     elseif bookinfo_found and authors == "" then
-        authors = _("Unknown Author")
+        authors = _("未知作者")
     end
 
     -- Create canvas
@@ -2232,14 +2254,46 @@ function MosaicMenuItem:paintTo(bb, x, y)
     -- ========================================================
     -- 书籍徽章处理
     -- ========================================================
-if not self.is_directory and filepath then
-    drawFavoriteStar(bb, cover_left, cover_top, cover_w, filepath)
-    drawProgressBadge(bb, cover_left, cover_top, cover_w, self.percent_finished)
-    drawNewBanner(bb, cover_left, cover_top, cover_w, cover_h, self.status)
-    dimFinishedBook(bb, cover_left, cover_top, cover_w, cover_h, self.status)
-    drawPageCountBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
-    drawFormatBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
-end
+    if not self.is_directory and filepath then
+        drawFavoriteStar(bb, cover_left, cover_top, cover_w, filepath)
+        drawProgressBadge(bb, cover_left, cover_top, cover_w, self.percent_finished)
+        drawNewBanner(bb, cover_left, cover_top, cover_w, cover_h, self.status)
+        dimFinishedBook(bb, cover_left, cover_top, cover_w, cover_h, self.status)
+        drawPageCountBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
+        drawFormatBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
+    end
+
+    -- ========================================================
+    -- 书籍封面横幅（在圆角裁剪之前绘制）- Mosaic 模式
+    -- ========================================================
+    if not self.is_directory and filepath then
+        local banner_cfg = getBookBannerConfig()
+        if banner_cfg.show_on_cover then
+            local ok_bim, BookInfoManager = pcall(require, "bookinfomanager")
+            if ok_bim then
+                local success, bookinfo = pcall(function()
+                    return BookInfoManager:getBookInfo(filepath, true)
+                end)
+                if success and bookinfo and not bookinfo.ignore_meta then
+                    local title = bookinfo.title
+                    if not title or title == "" then
+                        local fname = filepath:match("([^/]+)$") or ""
+                        title = fname:gsub("%.[^%.]+$", "")
+                    end
+                    local display_text = title
+                    local cfg = {
+                        name_centered = banner_cfg.centered,
+                        name_opaque = banner_cfg.opaque,
+                    }
+                    local border = 1
+                    local name_widget = drawFolderNameOnCover(display_text, cover_w - 2*border, cover_h - 2*border, cfg)
+                    if name_widget then
+                        name_widget:paintTo(bb, cover_left, cover_top)
+                    end
+                end
+            end
+        end
+    end
 
     -- ========================================================
     -- 文件夹封面额外绘制（覆盖在封面上的元素）
@@ -2252,13 +2306,13 @@ end
         local dimen_w = portrait_w + 2 * border
         local dimen_h = portrait_h + 2 * border
  
-    -- 绘制文件夹名称（覆盖在封面上）
-    if cfg.show_folder_name then
-        local name_widget = drawFolderNameOnCover(self._folder_name, portrait_w, portrait_h, cfg)
-        if name_widget then
-            name_widget:paintTo(bb, cover_left, cover_top)
+        -- 绘制文件夹名称（覆盖在封面上）
+        if cfg.show_folder_name then
+            local name_widget = drawFolderNameOnCover(self._folder_name, portrait_w, portrait_h, cfg)
+            if name_widget then
+                name_widget:paintTo(bb, cover_left, cover_top)
+            end
         end
-    end
        
         -- 绘制文件数量徽章（右上角）
         if cfg.show_item_count and self._folder_file_count and self._folder_file_count > 0 then
@@ -2311,16 +2365,16 @@ end
     local show_title = getBool("vc_show_title", true)
     local show_author = getBool("vc_show_author", true)
     
-if (show_title or show_author) and filepath then
-    if not self.is_directory then
-        drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, filepath, 0, y + self.height, show_title, show_author, false, self._vc_strip_h)
-    else
-        if show_title and self._folder_name then
-            drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, self._folder_name, 0, y + self.height, true, false, true, self._vc_strip_h)
-         end
-       end
-     end
-   end    
+    if (show_title or show_author) and filepath then
+        if not self.is_directory then
+            drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, filepath, 0, y + self.height, show_title, show_author, false, self._vc_strip_h)
+        else
+            if show_title and self._folder_name then
+                drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, self._folder_name, 0, y + self.height, true, false, true, self._vc_strip_h)
+            end
+        end
+    end
+end    
     logger.info("[视觉封面] Mosaic 模式补丁应用完成")
 end
 
@@ -2561,7 +2615,7 @@ local function applyListCoverPatch()
             if folder_file_count and folder_file_count > 0 then
                 local fs_info = getFontSize(12, dimen_h)
                 fs_info = math.min(fs_info, math.max(8, math.floor(content_h * 0.34)))
-                local count_str = tostring(folder_file_count) .. " " .. (folder_file_count == 1 and _("Book") or _("Books"))
+                local count_str = tostring(folder_file_count) .. " " .. (folder_file_count == 1 and _("本书") or _("本书"))
                 local wcount = TextWidget:new{
                     text = count_str,
                     face = VisualCoverFont.getFace(fs_info),
@@ -2619,7 +2673,7 @@ local function applyListCoverPatch()
         end
         
         -- ========================================================
-        -- 书籍：生成书籍封面
+        -- 书籍：生成书籍封面（List 模式，无横幅）
         -- ========================================================
         if not filepath then
             return
@@ -2782,7 +2836,7 @@ local function applyListCoverPatch()
         self.init_done = true
     end
     
-    -- 重写 paintTo（添加徽章、圆角等）
+    -- 重写 paintTo（添加徽章、圆角等）- List 模式无横幅
     function ListMenuItem:paintTo(bb, x, y)
         orig_paintTo(self, bb, x, y)
         
@@ -2808,23 +2862,19 @@ local function applyListCoverPatch()
             dimFinishedBook(bb, cover_left, cover_top, cover_w, cover_h, self.status)
             drawPageCountBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
             drawFormatBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
-        end  
-      
-        -- 文件夹封面额外绘制
+        end
+
+        -- ========================================================
+        -- List 模式：无书籍封面横幅（已删除）
+        -- ========================================================
+
+        -- 文件夹封面额外绘制（List 模式无文件夹名横幅）
         if self.is_directory and self._folder_name then
             local cfg = self._folder_cfg or getFolderConfig()
             local portrait_w = self._folder_portrait_w or cover_w
             local portrait_h = self._folder_portrait_h or cover_h
             local dimen_w = portrait_w + 2
             local dimen_h = portrait_h + 2
-            
-            -- 绘制文件夹名称
-            if cfg.show_folder_name then
-                local name_widget = drawFolderNameOnCover(self._folder_name, portrait_w, portrait_h, cfg)
-                if name_widget then
-                    name_widget:paintTo(bb, cover_left, cover_top)
-                end
-            end
             
             -- 绘制文件数量徽章
             if cfg.show_item_count and self._folder_file_count and self._folder_file_count > 0 then
@@ -2976,6 +3026,49 @@ local cover_settings_menu_config = {
                     { text = "显示格式徽章", checked_func = function() return getShowFormat() end, callback = function() setShowFormat(not getShowFormat()); refreshFileManager() end },
                 },
             },
+            -- 封面书名横幅（与徽章平级）
+            {
+                text = "封面书名横幅",
+                sub_item_table = {
+                    {
+                        text = "显示横幅",
+                        checked_func = function() return getBool("vc_show_title_on_cover", false) end,
+                        callback = function()
+                            setBookBannerShow(not getBool("vc_show_title_on_cover", false))
+                            refreshFileManager()
+                        end
+                    },
+                    {
+                        text = "居中显示",
+                        radio = true,
+                        enabled_func = function() return getBool("vc_show_title_on_cover", false) end,
+                        checked_func = function() return getBool("vc_title_centered", false) == true end,
+                        callback = function()
+                            setBookBannerCentered(true)
+                            refreshFileManager()
+                        end
+                    },
+                    {
+                        text = "底部显示",
+                        radio = true,
+                        enabled_func = function() return getBool("vc_show_title_on_cover", false) end,
+                        checked_func = function() return getBool("vc_title_centered", false) == false end,
+                        callback = function()
+                            setBookBannerCentered(false)
+                            refreshFileManager()
+                        end
+                    },
+                    {
+                        text = "不透明背景",
+                        enabled_func = function() return getBool("vc_show_title_on_cover", false) end,
+                        checked_func = function() return getBool("vc_title_opaque", false) == true end,
+                        callback = function()
+                            setBookBannerOpaque(not getBool("vc_title_opaque", false))
+                            refreshFileManager()
+                        end
+                    },
+                },
+            },
         },
     },
     {
@@ -3060,7 +3153,7 @@ userpatch.registerPatchPluginFunc("coverbrowser", function(plugin)
     Dispatcher:registerAction("fmcoversettings", {
         category = "none",
         event = "FMCoverSettings",
-        title = _("封面视觉设置"),
+        title = "封面视觉设置",
         filemanager = true,
     })
     
@@ -3152,7 +3245,7 @@ function FileManager:onFMCoverSettings()
                                 UIManager:close(self_ref._cover_settings_dialog)
                                 self_ref._cover_settings_dialog = nil
                             end
-                            showMenu(cover_settings_menu_config, _("封面视觉设置"), nil)
+                            showMenu(cover_settings_menu_config, "封面视觉设置", nil)
                         end
                     }
                 })
@@ -3160,7 +3253,7 @@ function FileManager:onFMCoverSettings()
         end
         
         local dialog = ButtonDialog:new{
-            title = title or _("封面视觉设置"),
+            title = title or "封面视觉设置",
             title_align = "center",
             buttons = buttons,
             width = math.floor(Screen:getWidth() * 0.7),
@@ -3170,7 +3263,7 @@ function FileManager:onFMCoverSettings()
         UIManager:show(dialog)
     end
     
-    showMenu(cover_settings_menu_config, _("封面视觉设置"), nil)
+    showMenu(cover_settings_menu_config, "封面视觉设置", nil)
     return true
 end
         FileManager._vc_handler_added = true
