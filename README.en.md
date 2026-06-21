@@ -437,14 +437,26 @@ Bind Dispatcher actions in KOReader's gesture settings (General):
 
 ## Troubleshooting
 
+# KOReader Quick Actions Patch - Troubleshooting Guide
+
+## Common Issues & Solutions
+
 | Issue | Solution |
-|-------|----------|
-| Panel doesn't display | Check if "Enable Tab" is turned on; delete configuration file `koreader/settings/quickactions.lua` and restart |
-| Nerd Font not displaying | If some icons show as question marks, the codepoint may not be compatible with your version—update the hardcoded Nerd Font codepoints in the patch file or remove the problematic ones |
-| SVG/PNG icons not displaying | Place icon files in `koreader/icons/` directory |
-| UI font switching doesn't take effect | Tab menu fonts require restarting KOReader to take effect |
-| Integrated plugin/patch actions unavailable | Confirm the plugin is installed and enabled; if still not working, the original plugin/patch may have been updated and the action interface may have changed—update the registration code accordingly |
-| Menu recording doesn't execute | Menu structure may have changed (e.g., system update, installing/updating other plugins/patches that inject or modify the menu) causing the recorded menu path to no longer point to the current menu—re-record the action |
+| :--- | :--- |
+| **Panel does not display** | 1. Check that "Enable Tabs" is turned on in KOReader settings.<br>2. If still not working, delete the config file `koreader/settings/quickactions.lua` and restart KOReader (this will reset the panel settings). |
+| **UI font change does not take effect** | Font changes in the tab menu require a **full restart of KOReader** to apply. Simply refreshing the interface is not sufficient. |
+| **Linked plugin/patch actions are unavailable** | 1. Make sure the target plugin is **enabled** in the plugin manager.<br>2. If the target plugin has been updated recently, its API interface may have changed — you will need to modify the registration code in this patch to adapt to the new interface. |
+| **Recorded menu action does not execute** | **Cause:** System updates, or installing/updating other plugins/patches may have altered the menu structure.<br>**Solution:** The original recorded menu path is no longer valid — you need to **re-record** the action. |
+| **Some icons display as question marks** | This patch uses KOReader's built-in Nerd Font file `symbol.ttf` for button icons, and `koreader/resources/icons/mdlight/star.empty.svg` for tab icons by default. If KOReader updates or you replace these font files, the icon codes may become mismatched. To fix this, locate the hardcoded Nerd Font codepoints in the source code and update them to match your current font file. |
+| **How to add your own custom icons** | Simply place your icon pack into the `koreader/icons` directory — the patch will automatically scan it. If your icons are in a different directory and not detected, click "Browse Files" to navigate to that directory and select them manually. |
+
+---
+
+## General Troubleshooting Tips
+
+- When in doubt, try **restarting KOReader** first — many issues resolve after a full restart.
+- If you encounter persistent problems, consider **backing up and resetting** the `quickactions.lua` config file.
+- For icon-related issues, ensure your font files are intact and compatible with the current KOReader version.
 
 ---
 
