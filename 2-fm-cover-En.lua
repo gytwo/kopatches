@@ -1,5 +1,5 @@
 --[[
-    File manager cover visual enhancement patch
+    Filemanager Cover Visual Enhancement Patch
     Supports both Mosaic mode (grid covers) and List mode (list covers)
     Feature list (by menu structure):
 
@@ -13,20 +13,21 @@
     - Dim finished books
     - Show page count
     - Show format badge
+    - Cover title banner
 
     [Folder Covers]
     - Cover mode: Gallery (4-grid collage) / Stack (stacked effect) / Normal (first cover) / None (folder name only)
-    - Show spine decorative lines
+    - Show spine decoration lines
     - Show file count
     - Folder name: Show name / Centered / Bottom / Opaque background
 
     [General]
     - Unified cover aspect ratio: 3:4 (default) / 2:3
-    - Rounded corners
-    - Show book title / folder name below cover
+    - Cover rounded corners
+    - Show book title/folder name below cover
     - Show book author below cover
     - Hide underline
-    - Hide up folder
+    - Hide parent folder entry
 
     [Gestures]
     - Gesture support to quickly open cover visual settings
@@ -42,7 +43,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 logger.info("[VisualCover] ========== Patch loading started ==========")
 
 -- ============================================================
--- Require all modules
+-- Unified require all modules
 -- ============================================================
 local Blitbuffer = require("ffi/blitbuffer")
 local Font = require("ui/font")
@@ -72,7 +73,7 @@ local TopContainer = require("ui/widget/container/topcontainer")
 local LeftContainer = require("ui/widget/container/leftcontainer")
 local RightContainer = require("ui/widget/container/rightcontainer")
 
--- Basic components
+-- Base widgets
 local ImageWidget = require("ui/widget/imagewidget")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
@@ -108,7 +109,7 @@ local function setString(key, value)
     G:saveSetting(key, value)
 end
 
--- Hide underline configuration
+-- Underline hide config
 local function getHideUnderline()
     return getBool("vc_hide_underline", false)
 end
@@ -117,7 +118,7 @@ local function setHideUnderline(value)
     setBool("vc_hide_underline", value)
 end
 
--- Format badge configuration
+-- Format badge config
 local function getShowFormat()
     return getBool("vc_show_format", true)
 end
@@ -126,13 +127,34 @@ local function setShowFormat(value)
     setBool("vc_show_format", value)
 end
 
--- Hide up folder configuration
+-- Hide parent folder config
 local function getHideUpFolder()
     return getBool("vc_hide_up_folder", false)
 end
 
 local function setHideUpFolder(value)
     setBool("vc_hide_up_folder", value)
+end
+
+-- Book cover banner config
+local function getBookBannerConfig()
+    return {
+        show_on_cover = getBool("vc_show_title_on_cover", false),
+        centered = getBool("vc_title_centered", false),
+        opaque = getBool("vc_title_opaque", false),
+    }
+end
+
+local function setBookBannerShow(value)
+    setBool("vc_show_title_on_cover", value)
+end
+
+local function setBookBannerCentered(value)
+    setBool("vc_title_centered", value)
+end
+
+local function setBookBannerOpaque(value)
+    setBool("vc_title_opaque", value)
 end
 
 local function refreshFileManager()
@@ -195,7 +217,7 @@ function VisualCoverFont.getFace(size)
 end
 
 -- ============================================================
--- Badge color
+-- Badge colors
 -- ============================================================
 
 local function getBadgeColor()
@@ -251,13 +273,12 @@ local function get_aspect_ratio()
     return ratio
 end
 
--- Check if title/author is visible
 local function isTitleVisible()
     return getBool("vc_show_title", true) or getBool("vc_show_author", true)
 end
 
 -- ============================================================
--- Cover generation functions (for placeholder covers)
+-- Cover generation (placeholder covers)
 -- ============================================================
 
 local function calcDims(max_w, max_h)
@@ -284,7 +305,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
         width, height = calcDims(9999, target_h or 300)
     end
 
-    -- Get metadata
     local ok, BookInfoManager = pcall(require, "bookinfomanager")
     local title = ""
     local authors = ""
@@ -304,7 +324,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
         end
     end
 
-    -- Fallback to filename (suppressed when no_fallback=true)
     if title == "" and not no_fallback then
         local fname = filepath:match("([^/]+)$") or ""
         fname = fname:gsub("/$", "")
@@ -319,7 +338,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
         authors = _("Unknown Author")
     end
 
-    -- Create canvas
     local final_bb = Blitbuffer.new(width, height, Blitbuffer.TYPE_BBRGB32)
     local style = getString("vc_placeholder_style", "simple")
     local split_y = math.floor(height * 2 / 3)
@@ -328,15 +346,12 @@ local function genCover(filepath, target_w, target_h, no_fallback)
     local max_text_width = width - 16
 
     if style == "simple" then
-        -- White background
         final_bb:fill(Blitbuffer.ColorRGB32(255, 255, 255, 255))
         
-        -- Font color is black
         local title_color = Blitbuffer.ColorRGB32(0, 0, 0, 255)
         local authors_color = Blitbuffer.ColorRGB32(0, 0, 0, 255)
         local bg_color = Blitbuffer.ColorRGB32(255, 255, 255, 255)
         
-        -- Title widget
         local title_font_size = VisualCoverFont.scaleValue(20)
         local min_title_font = VisualCoverFont.scaleValue(10)
         local title_widget = nil
@@ -375,7 +390,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
         end
         if title_widget then title_widget.handleEvent = function() return false end end
 
-        -- Author widget (only draw when authors is not empty)
         if authors ~= "" then
             local authors_font_size = VisualCoverFont.scaleValue(16)
             local min_authors_font = VisualCoverFont.scaleValue(6)
@@ -415,7 +429,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
                 authors_widget.handleEvent = function() return false end
             end
 
-            -- Paint author
             if authors_widget then
                 local authors_y = split_y + math.max(5, (author_area_h - authors_widget:getSize().h) / 2)
                 authors_widget:paintTo(final_bb, math.max(0, (width - authors_widget:getSize().w) / 2), authors_y)
@@ -423,7 +436,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
             end
         end
 
-        -- Paint title
         if title_widget then
             local title_y = math.max(5, (split_y - title_widget:getSize().h) / 2)
             title_widget:paintTo(final_bb, math.max(0, (width - title_widget:getSize().w) / 2), title_y)
@@ -431,7 +443,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
         end
 
     else
-        -- Gradient background
         local lighter_color = Blitbuffer.ColorRGB32(212, 220, 243, 255)
         local darker_color = Blitbuffer.ColorRGB32(130, 159, 227, 255)
         local title_color = Blitbuffer.ColorRGB32(1, 68, 142, 255)
@@ -448,7 +459,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
             end
         end
 
-        -- Title widget
         local title_font_size = VisualCoverFont.scaleValue(20)
         local min_title_font = VisualCoverFont.scaleValue(10)
         local title_widget = nil
@@ -487,7 +497,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
         end
         if title_widget then title_widget.handleEvent = function() return false end end
 
-        -- Author widget (only draw when authors is not empty)
         if authors ~= "" then
             local authors_font_size = VisualCoverFont.scaleValue(16)
             local min_authors_font = VisualCoverFont.scaleValue(6)
@@ -527,7 +536,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
                 authors_widget.handleEvent = function() return false end
             end
 
-            -- Paint author
             if authors_widget then
                 local authors_y = split_y + math.max(5, (author_area_h - authors_widget:getSize().h) / 2)
                 authors_widget:paintTo(final_bb, math.max(0, (width - authors_widget:getSize().w) / 2), authors_y)
@@ -535,7 +543,6 @@ local function genCover(filepath, target_w, target_h, no_fallback)
             end
         end
 
-        -- Paint title
         if title_widget then
             local title_y = math.max(5, (split_y - title_widget:getSize().h) / 2)
             title_widget:paintTo(final_bb, math.max(0, (width - title_widget:getSize().w) / 2), title_y)
@@ -563,7 +570,6 @@ local function loadExplicitCovers(path)
     local files = {}
     local mode = getString("vc_folder_mode", "gallery")
     
-    -- Find all cover* files
     local cover_files = {}
     for i = 1, 4 do
         local f = findAny(path, "cover" .. (i == 1 and "" or i))
@@ -572,12 +578,10 @@ local function loadExplicitCovers(path)
         end
     end
     
-    -- No cover files found
     if #cover_files == 0 then
         return nil
     end
     
-    -- Sort by number (cover comes first)
     table.sort(cover_files, function(a, b)
         local num_a = a:match("cover(%d*)")
         local num_b = b:match("cover(%d*)")
@@ -586,7 +590,6 @@ local function loadExplicitCovers(path)
         return num_a < num_b
     end)
     
-    -- Determine how many to take based on mode
     local max_count = (mode == "gallery" or mode == "stack") and 4 or 1
     local result = {}
     for i = 1, math.min(#cover_files, max_count) do
@@ -615,7 +618,6 @@ local function collectCovers(dir_path, max_covers, target_w, target_h)
     local ok2, iter, dir_obj = pcall(lfs.dir, dir_path)
     if not ok2 then return covers end
     
-    -- Collect files with their attributes
     local files = {}
     for f in iter, dir_obj do
         if f:sub(1,1) ~= "." then
@@ -633,12 +635,10 @@ local function collectCovers(dir_path, max_covers, target_w, target_h)
         end
     end
     
-    -- Read KOReader sort settings
     local G = rawget(_G, "G_reader_settings")
     local collate = G and G:readSetting("collate") or "strcoll"
     local reverse = G and G:isTrue("reverse_collate") or false
     
-    -- Sort by settings
     if collate == "access" or collate == "modification" or collate == "creation" then
         local time_field = collate
         if time_field == "creation" then time_field = "modification" end
@@ -653,7 +653,6 @@ local function collectCovers(dir_path, max_covers, target_w, target_h)
             end
         end)
     else
-        -- Sort by filename (strcoll)
         table.sort(files, function(a, b)
             if reverse then
                 return a.name:lower() > b.name:lower()
@@ -663,7 +662,6 @@ local function collectCovers(dir_path, max_covers, target_w, target_h)
         end)
     end
     
-    -- Take first max_covers
     for i = 1, math.min(#files, max_covers) do
         local f = files[i]
         local success, bookinfo = pcall(function()
@@ -790,7 +788,6 @@ local function drawStack(covers, portrait_w, portrait_h, border)
         }
     end
 
-    -- Handle 1-4 covers uniformly with stacked offset logic
     local book_width = math.floor(portrait_w * 0.72)
     local book_height = math.floor(book_width * (portrait_h / portrait_w))
     local base_x = math.floor((portrait_w - book_width) / 2)
@@ -807,7 +804,7 @@ local function drawStack(covers, portrait_w, portrait_h, border)
         offsets = { { x = step_x, y = -step_y }, { x = -step_x, y = step_y } }
     elseif n == 3 then
         offsets = { { x = step_x, y = -step_y }, { x = 0, y = 0 }, { x = -step_x, y = step_y } }
-    else -- n == 4
+    else
         local s3x = math.floor(step_x / 3)
         local s3y = math.floor(step_y / 3)
         offsets = {
@@ -957,7 +954,7 @@ local function drawNoImage(folder_name, portrait_w, portrait_h, border)
 end
 
 -- ============================================================
--- Folder configuration
+-- Folder config
 -- ============================================================
 
 local FolderEdge = {
@@ -1189,7 +1186,7 @@ local function paintCornerBanner(bb, cover_left, cover_right, cover_top, cover_h
 end
 
 -- ============================================================
--- Page count helper functions
+-- Page count helper
 -- ============================================================
 
 local function formatPageCount(pages)
@@ -1308,7 +1305,7 @@ local function getRoundedCornerTemplate(r, border_size, border_color_key)
 end
 
 -- ============================================================
--- Public rounded corner drawing function
+-- Public rounded corner function
 -- ============================================================
 
 local function applyRoundedCornersToCover(bb, cover_frame)
@@ -1546,7 +1543,7 @@ local function drawFormatBadge(bb, cover_left, cover_top, cover_w, cover_h, file
 end
 
 -- ============================================================
--- Title bar helper functions
+-- Title bar helpers
 -- ============================================================
 local TITLE_FONT = VisualCoverFont.scaleValue(16)
 local AUTHOR_FONT = VisualCoverFont.scaleValue(13)
@@ -1564,7 +1561,6 @@ end
 local TITLE_LINE_H = measure_line_h(TITLE_FONT, true)
 local AUTHOR_LINE_H = measure_line_h(AUTHOR_FONT, false)
 
-
 -- ============================================================
 -- Public title/author drawing function
 -- ============================================================
@@ -1572,7 +1568,6 @@ local AUTHOR_LINE_H = measure_line_h(AUTHOR_FONT, false)
 local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, filepath, y_offset, max_bottom, show_title, show_author, is_folder, strip_h)
     local ok_bim, BookInfoManager = pcall(require, "bookinfomanager")
     
-    -- Actual available height
     local text_y = cover_top + cover_h + TITLE_PAD + (y_offset or 0)
     local total_available = max_bottom - text_y
     
@@ -1611,7 +1606,6 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
     local title_h = 0
     local author_h = 0
     
-    -- Only title
     if show_title and not show_author and title and title ~= "" then
         for _, fs in ipairs(title_font_sizes) do
             if tw then tw:free() end
@@ -1632,7 +1626,6 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
         end
     end
     
-    -- Only author
     if not is_folder and not show_title and show_author and authors and authors ~= "" then
         for _, fs in ipairs(author_font_sizes) do
             if aw then aw:free() end
@@ -1653,15 +1646,11 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
         end
     end
     
-    -- Both title and author
     if not is_folder and show_title and show_author then
-        -- Check if author exists
         if authors and authors ~= "" then
-            -- Author exists, use original logic
             local title_min_fs = title_font_sizes[#title_font_sizes]  
             local author_min_fs = author_font_sizes[#author_font_sizes]  
             
-            -- Check if minimum font sizes can both fit
             local title_face_min = VisualCoverFont.getFace(title_min_fs)
             local tw_min = TextWidget:new{
                 text = BD.auto(title),
@@ -1689,13 +1678,11 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
             aw_min:free()
             
             if title_min_h + author_min_h + 2 <= total_available then
-                -- Minimum can fit both, try increasing font sizes alternately
                 local current_title_fs = title_min_fs
                 local current_author_fs = author_min_fs
                 local current_title_h = title_min_h
                 local current_author_h = author_min_h
                 
-                -- Get title height for given font size
                 local function get_title_h(fs)
                     local face = VisualCoverFont.getFace(fs)
                     local w = TextWidget:new{
@@ -1712,7 +1699,6 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
                     return h
                 end
                 
-                -- Get author height for given font size
                 local function get_author_h(fs)
                     local face = VisualCoverFont.getFace(fs)
                     local w = TextWidget:new{
@@ -1729,7 +1715,6 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
                     return h
                 end
                 
-                -- Find indices in font size lists
                 local title_idx = 1
                 for i, fs in ipairs(title_font_sizes) do
                     if fs == current_title_fs then
@@ -1746,11 +1731,9 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
                     end
                 end
                 
-                -- Alternate increasing
                 while true do
                     local changed = false
                     
-                    -- Try to increase title font
                     if title_idx > 1 then
                         local next_title_fs = title_font_sizes[title_idx - 1]
                         local next_title_h = get_title_h(next_title_fs)
@@ -1762,7 +1745,6 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
                         end
                     end
                     
-                    -- Try to increase author font
                     if author_idx > 1 then
                         local next_author_fs = author_font_sizes[author_idx - 1]
                         local next_author_h = get_author_h(next_author_fs)
@@ -1779,7 +1761,6 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
                     end
                 end
                 
-                -- Use final determined fonts
                 local title_face = VisualCoverFont.getFace(current_title_fs)
                 tw = TextWidget:new{
                     text = BD.auto(title),
@@ -1804,7 +1785,6 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
                 }
                 author_h = aw:getSize().h
             else
-                -- Minimum font sizes can't fit both, show only title
                 for _, fs in ipairs(title_font_sizes) do
                     if tw then tw:free() end
                     local face = VisualCoverFont.getFace(fs)
@@ -1825,7 +1805,6 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
                 aw = nil
             end
         else
-            -- No author, show title only
             if title and title ~= "" then
                 for _, fs in ipairs(title_font_sizes) do
                     if tw then tw:free() end
@@ -1849,7 +1828,6 @@ local function drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, f
         end
     end
     
-    -- Draw
     if tw then
         local sz = tw:getSize()
         tw:paintTo(bb, cover_left + math.floor((cover_w - sz.w) / 2), text_y)
@@ -1867,7 +1845,7 @@ end
 -- ============================================================
 -- Main patch function (Mosaic mode)
 -- ============================================================
-logger.info("[VisualCover] Starting to define Mosaic patch...")
+logger.info("[VisualCover] Starting Mosaic patch definition...")
 
 local function applyMosaicCoverPatch(plugin)
     logger.info("[VisualCover] ========== applyMosaicCoverPatch called ==========")
@@ -1876,7 +1854,7 @@ local function applyMosaicCoverPatch(plugin)
     local MosaicMenuItem = get_upvalue(MosaicMenu._updateItemsBuildUI, "MosaicMenuItem")
     
     if not MosaicMenuItem then
-        logger.warn("[VisualCover] Unable to get MosaicMenuItem, patch exiting")
+        logger.warn("[VisualCover] Unable to get MosaicMenuItem, patch aborted")
         return
     end
     
@@ -1934,7 +1912,6 @@ function MosaicMenuItem:init()
         local border = Size.border.thin
         max_img_w = self.width - 2 * border
         
-        -- Fixed unit 40px
         local UNIT_STRIP = 40
         
         local title_visible = getBool("vc_show_title", true)
@@ -1947,7 +1924,6 @@ function MosaicMenuItem:init()
             strip_h = UNIT_STRIP * 2     
         end
         
-        -- Store strip_h for paintTo use
         self._vc_strip_h = strip_h
         
         if title_visible or author_visible then
@@ -2207,7 +2183,6 @@ function MosaicMenuItem:update(...)
 end
     
 function MosaicMenuItem:paintTo(bb, x, y)
-    -- Disable native corner triangle indicators
     local saved_do_hint_opened = self.do_hint_opened
     self.do_hint_opened = false
     orig_paintTo(self, bb, x, y)
@@ -2215,7 +2190,6 @@ function MosaicMenuItem:paintTo(bb, x, y)
     
     local filepath = self.entry.path or self.entry.file
     
-    -- Find cover FrameContainer
     local target = self._cover_frame or (self[1] and self[1][1] and self[1][1][1])
     if not (target and target.dimen and target.dimen.y) then
         return
@@ -2230,19 +2204,52 @@ function MosaicMenuItem:paintTo(bb, x, y)
     local cover_h = target.dimen.h
     
     -- ========================================================
-    -- Book badge handling
+    -- Book badges
     -- ========================================================
-if not self.is_directory and filepath then
-    drawFavoriteStar(bb, cover_left, cover_top, cover_w, filepath)
-    drawProgressBadge(bb, cover_left, cover_top, cover_w, self.percent_finished)
-    drawNewBanner(bb, cover_left, cover_top, cover_w, cover_h, self.status)
-    dimFinishedBook(bb, cover_left, cover_top, cover_w, cover_h, self.status)
-    drawPageCountBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
-    drawFormatBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
-end
+    if not self.is_directory and filepath then
+        drawFavoriteStar(bb, cover_left, cover_top, cover_w, filepath)
+        drawProgressBadge(bb, cover_left, cover_top, cover_w, self.percent_finished)
+        drawNewBanner(bb, cover_left, cover_top, cover_w, cover_h, self.status)
+        dimFinishedBook(bb, cover_left, cover_top, cover_w, cover_h, self.status)
+        drawPageCountBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
+        drawFormatBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
+    end
 
     -- ========================================================
-    -- Folder cover extra drawing (elements overlaid on cover)
+    -- Book cover title banner (Mosaic mode only - fixed rounded corners)
+    -- ========================================================
+    if not self.is_directory and filepath then
+        local banner_cfg = getBookBannerConfig()
+        if banner_cfg.show_on_cover then
+            local ok_bim, BookInfoManager = pcall(require, "bookinfomanager")
+            if ok_bim then
+                local success, bookinfo = pcall(function()
+                    return BookInfoManager:getBookInfo(filepath, true)
+                end)
+                if success and bookinfo and not bookinfo.ignore_meta then
+                    local title = bookinfo.title
+                    if not title or title == "" then
+                        local fname = filepath:match("([^/]+)$") or ""
+                        title = fname:gsub("%.[^%.]+$", "")
+                    end
+                    local display_text = title
+                    local cfg = {
+                        name_centered = banner_cfg.centered,
+                        name_opaque = banner_cfg.opaque,
+                    }
+                    local border = 1
+                    -- Fix: pass cover size without border so rounded corners apply correctly
+                    local name_widget = drawFolderNameOnCover(display_text, cover_w - 2*border, cover_h - 2*border, cfg)
+                    if name_widget then
+                        name_widget:paintTo(bb, cover_left, cover_top)
+                    end
+                end
+            end
+        end
+    end
+
+    -- ========================================================
+    -- Folder cover overlays
     -- ========================================================
     if self.is_directory and self._folder_name then
         local cfg = self._folder_cfg or getFolderConfig()
@@ -2252,15 +2259,13 @@ end
         local dimen_w = portrait_w + 2 * border
         local dimen_h = portrait_h + 2 * border
  
-    -- Draw folder name (overlaid on cover)
-    if cfg.show_folder_name then
-        local name_widget = drawFolderNameOnCover(self._folder_name, portrait_w, portrait_h, cfg)
-        if name_widget then
-            name_widget:paintTo(bb, cover_left, cover_top)
+        if cfg.show_folder_name then
+            local name_widget = drawFolderNameOnCover(self._folder_name, portrait_w, portrait_h, cfg)
+            if name_widget then
+                name_widget:paintTo(bb, cover_left, cover_top)
+            end
         end
-    end
        
-        -- Draw file count badge (top-right corner)
         if cfg.show_item_count and self._folder_file_count and self._folder_file_count > 0 then
             local eff_size = math.floor(math.max(corner_mark_size, math.floor(cover_w * 0.14)) * badge_scale)
             local font_size = math.max(7, math.floor(eff_size * 0.24))
@@ -2287,7 +2292,6 @@ end
             tw:free()
         end
         
-        -- Draw spine decorative lines
         if cfg.show_spine_lines then
             local centered_top = math.floor((self.height - dimen_h) / 2)
             local top_h = 2 * (FolderEdge.thick + FolderEdge.margin)
@@ -2301,33 +2305,33 @@ end
     end
     
     -- ========================================================
-    -- Rounded corners (using public function)
+    -- Rounded corners
     -- ========================================================
     applyRoundedCornersToCover(bb, target)
     
     -- ========================================================
-    -- Text below cover (book title/author or folder name)
+    -- Title/author below cover
     -- ========================================================
     local show_title = getBool("vc_show_title", true)
     local show_author = getBool("vc_show_author", true)
     
-if (show_title or show_author) and filepath then
-    if not self.is_directory then
-        drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, filepath, 0, y + self.height, show_title, show_author, false, self._vc_strip_h)
-    else
-        if show_title and self._folder_name then
-            drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, self._folder_name, 0, y + self.height, true, false, true, self._vc_strip_h)
-         end
-       end
-     end
-   end    
+    if (show_title or show_author) and filepath then
+        if not self.is_directory then
+            drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, filepath, 0, y + self.height, show_title, show_author, false, self._vc_strip_h)
+        else
+            if show_title and self._folder_name then
+                drawTitleAndAuthor(bb, cover_left, cover_w, cover_top, cover_h, self._folder_name, 0, y + self.height, true, false, true, self._vc_strip_h)
+            end
+        end
+    end
+end    
     logger.info("[VisualCover] Mosaic mode patch applied")
 end
 
 -- ============================================================
--- List mode cover patch (completely independent, doesn't rely on native update)
+-- List mode cover patch (completely independent, no banner)
 -- ============================================================
-logger.info("[VisualCover] Starting to define List patch...")
+logger.info("[VisualCover] Starting List patch definition...")
 
 local function applyListCoverPatch()
     local ListMenu = require("listmenu")
@@ -2346,7 +2350,6 @@ local function applyListCoverPatch()
     
     local orig_paintTo = ListMenuItem.paintTo
     
-    -- Font size calculation function (consistent with Zen UI)
     local function getFontSize(nominal, dimen_h)
         local scale_by_size = Screen:scaleBySize(1000000) * (1/1000000)
         local scale = VisualCoverFont.getScale(18)
@@ -2358,7 +2361,6 @@ local function applyListCoverPatch()
         return fs
     end
     
-    -- Completely rewrite update - build entire widget directly
     function ListMenuItem:update()
         local filepath = self.filepath
         local is_dir = not (self.entry.is_file or self.entry.file)
@@ -2369,7 +2371,6 @@ local function applyListCoverPatch()
         local cover_v_pad = Screen:scaleBySize(4)
         local max_img = dimen_h - 2 * border - 2 * cover_v_pad
         
-        -- Unified cover aspect ratio
         local aspect_ratio = get_aspect_ratio()
         local target_w = math.floor(max_img * aspect_ratio)
         local target_h = max_img
@@ -2379,7 +2380,7 @@ local function applyListCoverPatch()
         end
         
         -- ========================================================
-        -- Handle up folder
+        -- Parent folder entry
         -- ========================================================
         if self.entry and self.entry.is_go_up then
             local text = "↑"
@@ -2405,7 +2406,6 @@ local function applyListCoverPatch()
             
             self._cover_frame = cover_frame
             
-            -- Build right-side text
             local pad_left = Screen:scaleBySize(8)
             local text_safe_pad_top = math.max(2, Screen:scaleBySize(4))
             local content_h = math.max(1, dimen_h - text_safe_pad_top * 2)
@@ -2470,7 +2470,7 @@ local function applyListCoverPatch()
         end
         
         -- ========================================================
-        -- Folder: generate folder cover
+        -- Folder: generate folder cover (no banner)
         -- ========================================================
         if is_dir then
             local dir_path = self.entry and self.entry.path
@@ -2486,7 +2486,6 @@ local function applyListCoverPatch()
                 folder_file_count = getFolderFileCount(dir_path)
             end
             
-            -- Collect covers
             local covers = loadExplicitCovers(dir_path)
             local max_covers = (mode == "gallery" or mode == "stack") and 4 or 1
             
@@ -2503,7 +2502,6 @@ local function applyListCoverPatch()
             local folder_name = dir_path:match("([^/]+)/?$") or dir_path
             folder_name = folder_name:gsub("/$", "")
             
-            -- Scale covers
             local scaled_covers = {}
             for _i, c in ipairs(covers) do
                 if c.w ~= target_w or c.h ~= target_h then
@@ -2529,7 +2527,6 @@ local function applyListCoverPatch()
                 cover_frame = drawNoImage(folder_name, target_w, target_h, border)
             end
             
-            -- Store cover info
             self._cover_frame = cover_frame
             self._folder_name = folder_name
             self._folder_cfg = cfg
@@ -2537,7 +2534,6 @@ local function applyListCoverPatch()
             self._folder_portrait_w = target_w
             self._folder_portrait_h = target_h
             
-            -- Build right-side text
             local right_widgets = {}
             local text_safe_pad_top = math.max(2, Screen:scaleBySize(4))
             local content_h = math.max(1, dimen_h - text_safe_pad_top * 2)
@@ -2561,7 +2557,7 @@ local function applyListCoverPatch()
             if folder_file_count and folder_file_count > 0 then
                 local fs_info = getFontSize(12, dimen_h)
                 fs_info = math.min(fs_info, math.max(8, math.floor(content_h * 0.34)))
-                local count_str = tostring(folder_file_count) .. " " .. (folder_file_count == 1 and _("Book") or _("Books"))
+                local count_str = tostring(folder_file_count) .. " " .. (folder_file_count == 1 and _("book") or _("books"))
                 local wcount = TextWidget:new{
                     text = count_str,
                     face = VisualCoverFont.getFace(fs_info),
@@ -2619,7 +2615,7 @@ local function applyListCoverPatch()
         end
         
         -- ========================================================
-        -- Book: generate book cover
+        -- Book: generate book cover (List mode - NO banner)
         -- ========================================================
         if not filepath then
             return
@@ -2633,7 +2629,6 @@ local function applyListCoverPatch()
         local bookinfo = BookInfoManager:getBookInfo(filepath, true)
         local has_cover = bookinfo and bookinfo.cover_bb and bookinfo.has_cover and bookinfo.cover_fetched
         
-        -- Get book status
         local BookList = require("ui/widget/booklist")
         local status = BookList.getBookStatus(filepath)
         if status then
@@ -2689,10 +2684,8 @@ local function applyListCoverPatch()
             }
         end
         
-        -- Store cover info
         self._cover_frame = cover_frame
         
-        -- Build right-side text
         local right_widgets = {}
         local text_safe_pad_top = math.max(2, Screen:scaleBySize(4))
         local content_h = math.max(1, dimen_h - text_safe_pad_top * 2)
@@ -2782,7 +2775,6 @@ local function applyListCoverPatch()
         self.init_done = true
     end
     
-    -- Rewrite paintTo (add badges, rounded corners, etc.)
     function ListMenuItem:paintTo(bb, x, y)
         orig_paintTo(self, bb, x, y)
         
@@ -2800,7 +2792,6 @@ local function applyListCoverPatch()
         local corner_mark_size = 20
         local badge_scale = getBadgeScale()
         
-        -- Book badge handling
         if not self.is_directory and filepath then
             drawFavoriteStar(bb, cover_left, cover_top, cover_w, filepath)
             drawProgressBadge(bb, cover_left, cover_top, cover_w, self.percent_finished)
@@ -2808,9 +2799,12 @@ local function applyListCoverPatch()
             dimFinishedBook(bb, cover_left, cover_top, cover_w, cover_h, self.status)
             drawPageCountBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
             drawFormatBadge(bb, cover_left, cover_top, cover_w, cover_h, filepath)
-        end  
-      
-        -- Folder cover extra drawing
+        end
+
+        -- ========================================================
+        -- List mode: NO book title banner (intentionally omitted)
+        -- ========================================================
+
         if self.is_directory and self._folder_name then
             local cfg = self._folder_cfg or getFolderConfig()
             local portrait_w = self._folder_portrait_w or cover_w
@@ -2818,15 +2812,6 @@ local function applyListCoverPatch()
             local dimen_w = portrait_w + 2
             local dimen_h = portrait_h + 2
             
-            -- Draw folder name
-            if cfg.show_folder_name then
-                local name_widget = drawFolderNameOnCover(self._folder_name, portrait_w, portrait_h, cfg)
-                if name_widget then
-                    name_widget:paintTo(bb, cover_left, cover_top)
-                end
-            end
-            
-            -- Draw file count badge
             if cfg.show_item_count and self._folder_file_count and self._folder_file_count > 0 then
                 local eff_size = math.floor(math.max(corner_mark_size, math.floor(cover_w * 0.14)) * badge_scale)
                 local font_size = math.max(7, math.floor(eff_size * 0.24))
@@ -2853,7 +2838,6 @@ local function applyListCoverPatch()
                 tw:free()
             end
             
-            -- Draw spine decorative lines
             if cfg.show_spine_lines then
                 local centered_top = math.floor((self.height - dimen_h) / 2)
                 local top_h = 2 * (FolderEdge.thick + FolderEdge.margin)
@@ -2866,7 +2850,6 @@ local function applyListCoverPatch()
             end
         end
         
-        -- Rounded corners
         applyRoundedCornersToCover(bb, target)
     end
     
@@ -2874,7 +2857,7 @@ local function applyListCoverPatch()
 end
 
 -- ============================================================
--- Hide up folder
+-- Hide parent folder entry
 -- ============================================================
 local function applyHideUpFolder()
     local FileChooser = require("ui/widget/filechooser")
@@ -2902,11 +2885,11 @@ local function applyHideUpFolder()
         return items
     end
     
-    logger.info("[VisualCover] Hide up folder feature installed")
+    logger.info("[VisualCover] Hide parent folder feature installed")
 end
 
 -- ============================================================
--- Cover visual settings menu configuration (for direct gesture access)
+-- Cover visual settings menu config (for gesture direct access)
 -- ============================================================
 local cover_settings_menu_config = {
     {
@@ -2976,6 +2959,48 @@ local cover_settings_menu_config = {
                     { text = "Show Format Badge", checked_func = function() return getShowFormat() end, callback = function() setShowFormat(not getShowFormat()); refreshFileManager() end },
                 },
             },
+            {
+                text = "Cover Title Banner",
+                sub_item_table = {
+                    {
+                        text = "Show Banner",
+                        checked_func = function() return getBool("vc_show_title_on_cover", false) end,
+                        callback = function()
+                            setBookBannerShow(not getBool("vc_show_title_on_cover", false))
+                            refreshFileManager()
+                        end
+                    },
+                    {
+                        text = "Centered",
+                        radio = true,
+                        enabled_func = function() return getBool("vc_show_title_on_cover", false) end,
+                        checked_func = function() return getBool("vc_title_centered", false) == true end,
+                        callback = function()
+                            setBookBannerCentered(true)
+                            refreshFileManager()
+                        end
+                    },
+                    {
+                        text = "Bottom",
+                        radio = true,
+                        enabled_func = function() return getBool("vc_show_title_on_cover", false) end,
+                        checked_func = function() return getBool("vc_title_centered", false) == false end,
+                        callback = function()
+                            setBookBannerCentered(false)
+                            refreshFileManager()
+                        end
+                    },
+                    {
+                        text = "Opaque Background",
+                        enabled_func = function() return getBool("vc_show_title_on_cover", false) end,
+                        checked_func = function() return getBool("vc_title_opaque", false) == true end,
+                        callback = function()
+                            setBookBannerOpaque(not getBool("vc_title_opaque", false))
+                            refreshFileManager()
+                        end
+                    },
+                },
+            },
         },
     },
     {
@@ -2990,7 +3015,7 @@ local cover_settings_menu_config = {
                     { text = "None (folder name only)", radio = true, checked_func = function() return getString("vc_folder_mode", "gallery") == "none" end, callback = function() setString("vc_folder_mode", "none"); refreshFileManager() end },
                 },
             },
-            { text = "Show Spine Decorative Lines", checked_func = function() return getBool("vc_show_spine", true) end, callback = function() setBool("vc_show_spine", not getBool("vc_show_spine", true)); refreshFileManager() end },
+            { text = "Show Spine Decoration Lines", checked_func = function() return getBool("vc_show_spine", true) end, callback = function() setBool("vc_show_spine", not getBool("vc_show_spine", true)); refreshFileManager() end },
             { text = "Show File Count", checked_func = function() return getBool("vc_show_itemcount", true) end, callback = function() setBool("vc_show_itemcount", not getBool("vc_show_itemcount", true)); refreshFileManager() end },
             {
                 text = "Folder Name",
@@ -3010,11 +3035,11 @@ local cover_settings_menu_config = {
             { text = "2:3", radio = true, checked_func = function() return getString("vc_cover_ratio", "3:4") == "2:3" end, callback = function() setString("vc_cover_ratio", "2:3"); refreshFileManager() end },
         },
     },
-    { text = "Rounded Corners", checked_func = function() return getBool("vc_rounded_corners", true) end, callback = function() setBool("vc_rounded_corners", not getBool("vc_rounded_corners", true)); refreshFileManager() end },
-    { text = "Show Book Title / Folder Name Below Cover", checked_func = function() return getBool("vc_show_title", true) end, callback = function() setBool("vc_show_title", not getBool("vc_show_title", true)); refreshFileManager() end },
+    { text = "Cover Rounded Corners", checked_func = function() return getBool("vc_rounded_corners", true) end, callback = function() setBool("vc_rounded_corners", not getBool("vc_rounded_corners", true)); refreshFileManager() end },
+    { text = "Show Book Title/Folder Name Below Cover", checked_func = function() return getBool("vc_show_title", true) end, callback = function() setBool("vc_show_title", not getBool("vc_show_title", true)); refreshFileManager() end },
     { text = "Show Book Author Below Cover", checked_func = function() return getBool("vc_show_author", true) end, callback = function() setBool("vc_show_author", not getBool("vc_show_author", true)); refreshFileManager() end },
     { text = "Hide Underline", checked_func = function() return getHideUnderline() end, callback = function() setHideUnderline(not getHideUnderline()); refreshFileManager() end },
-    { text = "Hide Up Folder", checked_func = function() return getHideUpFolder() end, callback = function() setHideUpFolder(not getHideUpFolder()); refreshFileManager() end },
+    { text = "Hide Parent Folder Entry", checked_func = function() return getHideUpFolder() end, callback = function() setHideUpFolder(not getHideUpFolder()); refreshFileManager() end },
 }
 
 -- ============================================================
@@ -3039,7 +3064,7 @@ local function injectMenu(plugin)
         }
         
         table.insert(menu_items, cover_menu)
-        logger.info("[VisualCover] Menu injected successfully")
+        logger.info("[VisualCover] Menu injection successful")
     end
 end
 
@@ -3054,13 +3079,10 @@ userpatch.registerPatchPluginFunc("coverbrowser", function(plugin)
     applyHideUpFolder()
     injectMenu(plugin)
     
-    -- ============================================================
-    -- Register Dispatcher gesture action (directly open cover visual settings)
-    -- ============================================================
     Dispatcher:registerAction("fmcoversettings", {
         category = "none",
         event = "FMCoverSettings",
-        title = _("Cover Visual Settings"),
+        title = "Cover Visual Settings",
         filemanager = true,
     })
     
@@ -3069,13 +3091,11 @@ userpatch.registerPatchPluginFunc("coverbrowser", function(plugin)
 function FileManager:onFMCoverSettings()
     local self_ref = self
     
-    -- Recursively build menu, passing current menu, title, and parent stack
     local function showMenu(items, title, parent_stack)
         local buttons = {}
         
         for _, item in ipairs(items) do
             if item.sub_item_table then
-                -- Has submenu: add ▸ indicator
                 local new_stack = {}
                 for _, v in ipairs(parent_stack or {}) do
                     table.insert(new_stack, v)
@@ -3095,7 +3115,6 @@ function FileManager:onFMCoverSettings()
                     }
                 })
             else
-                -- Normal option: show checkmark
                 local checked = item.checked_func and item.checked_func() or false
                 local display_text = (checked and "✓ " or "  ") .. item.text
                 
@@ -3106,7 +3125,6 @@ function FileManager:onFMCoverSettings()
                             if item.callback then
                                 item.callback()
                             end
-                            -- Refresh current menu
                             if self_ref._cover_settings_dialog then
                                 UIManager:close(self_ref._cover_settings_dialog)
                                 self_ref._cover_settings_dialog = nil
@@ -3118,12 +3136,9 @@ function FileManager:onFMCoverSettings()
             end
         end
         
-        -- Add back button (if there is a parent)
         if parent_stack and #parent_stack > 0 then
-            -- Separator
             table.insert(buttons, {})
             
-            -- Go back one level (using ◂)
             table.insert(buttons, {
                 {
                     text = "◂ " .. _("Back"),
@@ -3142,17 +3157,16 @@ function FileManager:onFMCoverSettings()
                 }
             })
             
-            -- Go back to root menu (using ◂◂)
             if #parent_stack > 1 then
                 table.insert(buttons, {
                     {
-                        text = "◂◂ " .. _("Back to Root"),
+                        text = "◂◂ " .. _("Root Menu"),
                         callback = function()
                             if self_ref._cover_settings_dialog then
                                 UIManager:close(self_ref._cover_settings_dialog)
                                 self_ref._cover_settings_dialog = nil
                             end
-                            showMenu(cover_settings_menu_config, _("Cover Visual Settings"), nil)
+                            showMenu(cover_settings_menu_config, "Cover Visual Settings", nil)
                         end
                     }
                 })
@@ -3160,7 +3174,7 @@ function FileManager:onFMCoverSettings()
         end
         
         local dialog = ButtonDialog:new{
-            title = title or _("Cover Visual Settings"),
+            title = title or "Cover Visual Settings",
             title_align = "center",
             buttons = buttons,
             width = math.floor(Screen:getWidth() * 0.7),
@@ -3170,7 +3184,7 @@ function FileManager:onFMCoverSettings()
         UIManager:show(dialog)
     end
     
-    showMenu(cover_settings_menu_config, _("Cover Visual Settings"), nil)
+    showMenu(cover_settings_menu_config, "Cover Visual Settings", nil)
     return true
 end
         FileManager._vc_handler_added = true
