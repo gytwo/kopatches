@@ -344,18 +344,418 @@ local function getButtonSizePct()
 end
 
 -- ============================================================
+-- ============================================================
+-- 内置 PluginScan (独立实现，不依赖外部模块)
+-- ============================================================
+
+local PluginScan = {}
+
+PluginScan.SENTINEL = "__menu_callback"
+PluginScan.SUBMENU = "__menu_submenu"
+
+local EXCLUDED_PLUGINS = {
+    zen_ui = true,
+}
+
+local LAUNCH_METHODS = { "onShow", "show", "open", "launch", "onOpen" }
+
+local function plugin_loader()
+    local ok, loader = pcall(require, "pluginloader")
+    return ok and loader or nil
+end
+
+local function live_uis()
+    local out = {}
+    local fm_mod = package.loaded["apps/filemanager/filemanager"]
+    if fm_mod and fm_mod.instance then
+        out[#out + 1] = fm_mod.instance
+    end
+    local reader_mod = package.loaded["apps/reader/readerui"]
+    if reader_mod and reader_mod.instance then
+        out[#out + 1] = reader_mod.instance
+    end
+    return out
+end
+
+local function enabled_plugin_names()
+    local names = {}
+    local loader = plugin_loader()
+    if not (loader and type(loader.loadPlugins) == "function") then
+        return names
+    end
+    local ok, enabled = pcall(loader.loadPlugins, loader)
+    if not ok or type(enabled) ~= "table" then
+        return names
+    end
+    for _i, plugin in ipairs(enabled) do
+        if type(plugin) == "table" and type(plugin.name) == "string" then
+            names[plugin.name] = true
+        end
+    end
+    names.zen_ui = nil
+    return names
+end
+
+local function is_callable(value)
+    if type(value) == "function" then return true end
+    local mt = type(value) == "table" and getmetatable(value) or nil
+    return type(mt) == "table" and type(mt.__call) == "function"
+end
+
+local function probe_menu_entry(mod, key)
+    if type(mod.addToMainMenu) ~= "function" then return nil end
+    local probe = {}
+    local ok = pcall(mod.addToMainMenu, mod, probe)
+    if not ok then return nil end
+    local entry = probe[key]
+    if entry == nil and type(mod.name) == "string" then
+        entry = probe[mod.name]
+    end
+    if entry == nil then
+        local only, count = nil, 0
+        for _k, value in pairs(probe) do
+            if type(value) == "table" then
+                count = count + 1
+                only = value
+            end
+        end
+        if count == 1 then entry = only end
+    end
+    return type(entry) == "table" and entry or nil
+end
+
+local function text_without_glyph(text)
+    if type(text) ~= "string" then return nil end
+    return (text:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function entry_text(entry)
+    if type(entry) ~= "table" then return nil end
+    if type(entry.text_func) == "function" then
+        local ok, text = pcall(entry.text_func)
+        if ok then return text_without_glyph(text) end
+    end
+    return text_without_glyph(entry.text)
+end
+
+local function find_method(mod, key)
+    for _i, method in ipairs(LAUNCH_METHODS) do
+        if is_callable(mod[method]) then return method end
+    end
+    local camel = "on" .. key:sub(1, 1):upper() .. key:sub(2)
+    if is_callable(mod[camel]) then return camel end
+    local entry = probe_menu_entry(mod, key)
+    if entry then
+        if type(entry.callback) == "function" then
+            return PluginScan.SENTINEL
+        end
+        if entry.sub_item_table ~= nil or entry.sub_item_table_func ~= nil then
+            return PluginScan.SUBMENU
+        end
+    end
+end
+
+local function add_candidate(out, seen, key, mod)
+    if type(key) ~= "string" or key == "" or EXCLUDED_PLUGINS[key] or seen[key]
+            or type(mod) ~= "table" then
+        return
+    end
+    local method = find_method(mod, key)
+    if not method then return end
+    seen[key] = true
+    local entry = probe_menu_entry(mod, key)
+    local title = entry_text(entry)
+    if not title or title == "" then
+        title = key:sub(1, 1):upper() .. key:sub(2)
+    end
+    out[#out + 1] = { key = key, method = method, title = title }
+end
+
+function PluginScan.scan()
+    local ok, results = pcall(function()
+        local out, seen = {}, {}
+        local loader = plugin_loader()
+        
+        -- 扫描插件（原有）
+        if loader and type(loader.loaded_plugins) == "table" then
+            for key, mod in pairs(loader.loaded_plugins) do
+                add_candidate(out, seen, key, mod)
+            end
+        end
+
+        local names = enabled_plugin_names()
+        if loader and type(loader.getPluginInstance) == "function" then
+            for key in pairs(names) do
+                local ok_plugin, plugin = pcall(loader.getPluginInstance, loader, key)
+                if ok_plugin then
+                    add_candidate(out, seen, key, plugin)
+                end
+            end
+        end
+
+        for _i, ui in ipairs(live_uis()) do
+            for key in pairs(names) do
+                add_candidate(out, seen, key, ui[key])
+            end
+        end
+        
+-- ============================================================
+-- 新增：扫描补丁（直接扫描 menu_items）
+-- ============================================================
+local FM = require("apps/filemanager/filemanager")
+local fm = FM and FM.instance
+local RUI = require("apps/reader/readerui")
+local reader = RUI and RUI.instance
+
+local function scanPatchItems(items, parent_title)
+    if type(items) ~= "table" then return end
+    for _, item in ipairs(items) do
+        if type(item) == "table" then
+            local text = entry_text(item)
+            
+            -- 检查是否有子菜单
+            local sub = item.sub_item_table
+            if sub == nil and type(item.sub_item_table_func) == "function" then
+                local ok, res = pcall(item.sub_item_table_func, TOUCHMENU_STUB)
+                if ok then sub = res end
+            end
+            
+            if type(sub) == "table" and #sub > 0 then
+                -- 有子菜单：递归扫描，传递当前 text 作为父级
+                scanPatchItems(sub, text)
+            elseif text and type(item.callback) == "function" then
+                -- 可执行项：组合父级+当前名
+                local display_title = parent_title and (parent_title .. " · " .. text) or text
+                local patch_key = "patch_" .. display_title
+                if not seen[patch_key] then
+                    seen[patch_key] = true
+                    table.insert(out, {
+                        key = patch_key,
+                        method = PluginScan.SENTINEL,
+                        title = text,
+                        display_title = display_title,
+                        is_patch = true,
+                    })
+                end
+            end
+        end
+    end
+end
+
+if fm and fm.menu and fm.menu.menu_items then
+    scanPatchItems(fm.menu.menu_items)
+end
+
+if reader and reader.menu and reader.menu.menu_items then
+    scanPatchItems(reader.menu.menu_items)
+end        
+        table.sort(out, function(a, b) return a.title < b.title end)
+        return out
+    end)
+    return ok and results or {}
+end
+
+local function live_plugin(key)
+    local loader = plugin_loader()
+    local loaded = loader and loader.loaded_plugins
+    if type(loaded) == "table" and type(loaded[key]) == "table" then
+        return loaded[key]
+    end
+    if loader and type(loader.getPluginInstance) == "function" then
+        local ok, plugin = pcall(loader.getPluginInstance, loader, key)
+        if ok and type(plugin) == "table" then
+            return plugin
+        end
+    end
+    for _i, ui in ipairs(live_uis()) do
+        if type(ui[key]) == "table" then
+            return ui[key]
+        end
+    end
+end
+
+function PluginScan.exists(key, method)
+    if type(key) ~= "string" or type(method) ~= "string" then return false end
+    local mod = live_plugin(key)
+    if type(mod) ~= "table" then return false end
+    if method == PluginScan.SENTINEL or method == PluginScan.SUBMENU then
+        return type(mod.addToMainMenu) == "function"
+    end
+    return is_callable(mod[method])
+end
+
+local TOUCHMENU_STUB = {
+    closeMenu = function() end,
+    onClose = function() end,
+    updateItems = function() end,
+    handleEvent = function() return false end,
+}
+
+function PluginScan.resolve(key, method)
+    -- ============================================================
+    -- 新增：处理补丁（patch_ 开头的 key）
+    -- ============================================================
+    if type(key) == "string" and string.sub(key, 1, 6) == "patch_" then
+        -- 提取菜单名
+        local full_name = string.sub(key, 7)
+        local menu_title = full_name
+        local last_dot = string.find(full_name, " · ", 1, true)
+        if last_dot then
+            menu_title = string.sub(full_name, last_dot + 3)
+        end
+            menu_title = menu_title:gsub("^%s+", ""):gsub("%s+$", "")
+        
+        -- 在菜单中查找
+        local FM = require("apps/filemanager/filemanager")
+        local fm = FM and FM.instance
+        local RUI = require("apps/reader/readerui")
+        local reader = RUI and RUI.instance
+        
+        local function findCallback(items)
+            if type(items) ~= "table" then return nil end
+            for _, item in ipairs(items) do
+                if type(item) == "table" then
+                    local text = entry_text(item)
+                    if text == menu_title and type(item.callback) == "function" then
+                        return item.callback
+                    end
+                    local sub = item.sub_item_table
+                    if sub == nil and type(item.sub_item_table_func) == "function" then
+                        local ok, res = pcall(item.sub_item_table_func, TOUCHMENU_STUB)
+                        if ok then sub = res end
+                    end
+                    if type(sub) == "table" then
+                        local cb = findCallback(sub)
+                        if cb then return cb end
+                    end
+                end
+            end
+            return nil
+        end
+        
+        local callback = nil
+        if fm and fm.menu and fm.menu.menu_items then
+            callback = findCallback(fm.menu.menu_items)
+        end
+        if not callback and reader and reader.menu and reader.menu.menu_items then
+            callback = findCallback(reader.menu.menu_items)
+        end
+        
+        if callback then
+            return function()
+                return callback(TOUCHMENU_STUB)
+            end
+        else
+            return nil
+        end
+    end
+    
+    -- 原有逻辑：插件
+    if type(key) ~= "string" or type(method) ~= "string" then return nil end
+    local mod = live_plugin(key)
+    if type(mod) ~= "table" then return nil end
+    if method == PluginScan.SENTINEL then
+        local entry = probe_menu_entry(mod, key)
+        local callback = entry and entry.callback
+        if type(callback) ~= "function" then return nil end
+        return function()
+            return callback(TOUCHMENU_STUB)
+        end
+    end
+    if method == PluginScan.SUBMENU then
+        local entry = probe_menu_entry(mod, key)
+        if not entry then return nil end
+        local sub_items = entry.sub_item_table
+        if sub_items == nil and type(entry.sub_item_table_func) == "function" then
+            local ok_sub, res = pcall(entry.sub_item_table_func, TOUCHMENU_STUB)
+            if ok_sub then sub_items = res end
+        end
+        if type(sub_items) ~= "table" then return nil end
+        local title = type(entry.text) == "string" and entry.text or key
+        return function()
+            local ok_host, menu_host = pcall(require, "modules/menu/app_launcher/menu_host")
+            if ok_host and menu_host and type(menu_host.show) == "function" then
+                return menu_host.show{
+                    title = title,
+                    item_table = sub_items,
+                }
+            else
+                local buttons = {}
+                for _, item in ipairs(sub_items) do
+                    local cb = item.callback
+                    if type(item.text_func) == "function" then
+                        buttons[#buttons + 1] = {{
+                            text = item.text_func(),
+                            callback = function()
+                                if cb then cb() end
+                            end,
+                        }}
+                    elseif type(item.text) == "string" then
+                        buttons[#buttons + 1] = {{
+                            text = item.text,
+                            callback = function()
+                                if cb then cb() end
+                            end,
+                        }}
+                    end
+                end
+                UIManager:show(ButtonDialog:new{
+                    title = title,
+                    title_align = "center",
+                    buttons = buttons,
+                    width = math.floor(Screen:getWidth() * 0.7),
+                })
+            end
+        end
+    end
+    if not is_callable(mod[method]) then return nil end
+    return function()
+        return mod[method](mod)
+    end
+end
+
+-- ============================================================
+-- 插件发现（使用内置 PluginScan）
+-- ============================================================
+
+local function getPluginsList()
+    local ok_loader, PluginLoader = pcall(require, "pluginloader")
+    if ok_loader and PluginLoader and type(PluginLoader.loadPlugins) == "function" then
+        pcall(PluginLoader.loadPlugins, PluginLoader)
+    end
+    
+    local plugins = PluginScan.scan()
+    logger.info("[QuickActions] 发现 " .. #plugins .. " 个插件/补丁")
+    return plugins
+end
+
+-- ============================================================
+-- 插件执行（使用 PluginScan.resolve）
+-- ============================================================
+
+local function executePluginAction(plugin_key, plugin_method)
+    local resolve_func = PluginScan.resolve(plugin_key, plugin_method)
+    if not resolve_func then
+        UIManager:show(InfoMessage:new{
+            text = string.format(_("无法解析插件方法: %s.%s"), plugin_key, plugin_method),
+            timeout = 2,
+        })
+        return
+    end
+    
+    pcall(resolve_func)
+end
+
+-- ============================================================
 -- UI 字体切换功能（三种字体类型，自动替换所有对应的 key）
 -- ============================================================
 
--- ⭐ 先声明函数，解决循环引用
 local showFontPickerForUIKey
 local showUIFontSwitcher
 
--- 跟踪对话框
 local _font_picker_dialog = nil
 local _font_main_dialog = nil
 
--- 获取所有可用字体
 local function getAvailableFonts()
     local fonts = FontList:getFontList()
     local result = {}
@@ -375,33 +775,28 @@ local function getAvailableFonts()
     return result
 end
 
--- UI字体配置列表（三种字体类型）
 local UI_FONT_ITEMS = {
     { key = "regular", label = _("常规字体"), default = "NotoSans-Regular.ttf" },
     { key = "bold", label = _("粗体字体"), default = "NotoSans-Bold.ttf" },
     { key = "mono", label = _("等宽字体"), default = "DroidSansMono.ttf" },
 }
 
--- 每种字体类型对应的 fontmap key 列表
 local FONT_TYPE_MAP = {
     regular = {"cfont", "ffont", "smallffont", "largeffont", "rifont", "pgfont", "hfont", "infofont", "smallinfofont", "x_smallinfofont", "xx_smallinfofont"},
     bold = {"tfont", "smalltfont", "x_smalltfont", "smallinfofontbold"},
     mono = {"scfont", "hpkfont", "infont", "smallinfont"},
 }
 
--- 获取当前字体
 local function getCurrentUIFont(key)
     local Font = require("ui/font")
     return Font.fontmap[key] or ""
 end
 
--- 获取用户覆盖的字体
 local function getUIFontOverride(key)
     local overrides = getTable("ui_font_overrides") or {}
     return overrides[key]
 end
 
--- ⭐ 应用字体变更
 local function applyUIFontChanges()
     local Font = require("ui/font")
     
@@ -440,7 +835,6 @@ local function applyUIFontChanges()
     
     Font.faces = {}
     
-    -- 刷新已加载的 Widget 类
     local ok, Button = pcall(require, "ui/widget/button")
     if ok and Button then
         Button.text_font_face = regular_font
@@ -465,7 +859,6 @@ local function applyUIFontChanges()
         InfoMessage.face = Font:getFace("infofont", orig_size)
     end
     
-    -- Notification
     local ok, Notification = pcall(require, "ui/widget/notification")
     if ok and Notification then
         local orig_size = Notification.face.orig_size or 18
@@ -502,7 +895,6 @@ local function applyUIFontChanges()
         end
     end
     
-    -- 刷新 Menu 和 TouchMenu 的 item 渲染
     local ok, Menu = pcall(require, "ui/widget/menu")
     if ok and Menu and Menu.updateItems then
         local orig_update = Menu.updateItems
@@ -546,7 +938,6 @@ local function applyUIFontChanges()
     end
 end
 
--- ⭐ 设置UI字体覆盖
 local function setUIFontOverride(key, font_name)
     local overrides = getTable("ui_font_overrides") or {}
     if font_name then
@@ -559,7 +950,6 @@ local function setUIFontOverride(key, font_name)
     UIManager:setDirty("all", "full")
 end
 
--- ⭐ 重置所有UI字体
 local function resetAllUIFonts()
     setTable("ui_font_overrides", {})
     UIManager:show(Notification:new{
@@ -576,7 +966,6 @@ local function resetAllUIFonts()
     })
 end
 
--- ⭐ 字体选择器
 function showFontPickerForUIKey(ui_key, ui_label, on_select, on_cancel)
     if _font_picker_dialog then
         UIManager:close(_font_picker_dialog)
@@ -651,7 +1040,6 @@ function showFontPickerForUIKey(ui_key, ui_label, on_select, on_cancel)
     UIManager:show(dialog)
 end
 
--- ⭐ 显示UI字体切换主界面
 function showUIFontSwitcher()
     if _font_main_dialog then
         UIManager:close(_font_main_dialog)
@@ -741,7 +1129,6 @@ function showUIFontSwitcher()
     UIManager:show(dialog)
 end
 
--- ⭐ 在文件加载时执行一次
 applyUIFontChanges()
 
 -- ============================================================
@@ -776,14 +1163,12 @@ end
 
 local ffi = require("ffi")
 
--- 动态声明 FT_Get_Glyph_Name
 ffi.cdef[[
     FT_Error FT_Get_Glyph_Name(FT_Face face, FT_UInt glyph_index, FT_String *buffer, FT_UInt buffer_max);
 ]]
 
 local ft2 = ffi.loadlib("freetype", "6")
 
--- 检测字符码位是否在 Nerd Font 中有效
 local function isValidNerdChar(cp)
     if not cp or type(cp) ~= "number" then return false end
     
@@ -793,7 +1178,6 @@ local function isValidNerdChar(cp)
     return face.ftsize:hasGlyph(cp)
 end
 
--- 获取 Nerd Font 图标的 glyph 名称
 local function getNerdGlyphName(cp)
     if not cp or type(cp) ~= "number" then return nil end
     
@@ -814,7 +1198,6 @@ local function getNerdGlyphName(cp)
     return ffi.string(buffer)
 end
 
--- 动态生成所有有效的 Nerd Font 图标（每次重新扫描）
 local function getNerdIcons()
     
     local icons = {}
@@ -822,31 +1205,19 @@ local function getNerdIcons()
     local name_cache = {}
     
     local ranges = {
-        -- 第一组：最常用
-        {0x23FB, 0x23FE},  -- 电源符号
-
-        -- 第二组：编程开发图标（Devicons 图标）
-        {0xE700, 0xE7FF},  -- Devicons（编程开发图标）
-
-        -- 第三组：Font Awesome
-        {0xF000, 0xF3FF},  -- Font Awesome 前半
-        {0xF500, 0xF8FF},  -- Font Awesome 后半
-
-        -- 第四组：Material Design
-        {0xE800, 0xE8FF},  -- Material 后半
-        {0xE000, 0xE09F},  -- Material 前半
-        {0xE100, 0xE2FF},  -- Material 中间
-        {0xE400, 0xE6FF},  -- Material 中间
-
-        -- 第五组：Octicons（GitHub 图标）
-        {0xF400, 0xF4FF},  -- Octicons
-
-        -- 第六组：特定领域（用得少，放最后）
-        {0xE300, 0xE3FF},  -- Weather（天气图标）
-        {0xE0A0, 0xE0FF},  -- Powerline（终端装饰符）
+        {0x23FB, 0x23FE},
+        {0xE700, 0xE7FF},
+        {0xF000, 0xF3FF},
+        {0xF500, 0xF8FF},
+        {0xE800, 0xE8FF},
+        {0xE000, 0xE09F},
+        {0xE100, 0xE2FF},
+        {0xE400, 0xE6FF},
+        {0xF400, 0xF4FF},
+        {0xE300, 0xE3FF},
+        {0xE0A0, 0xE0FF},
     }
     
-    -- 第一遍：获取所有有效的码位，并缓存名称
     for _, range in ipairs(ranges) do
         for cp = range[1], range[2] do
             if cp >= 0xD800 and cp <= 0xDFFF then goto continue end
@@ -865,7 +1236,6 @@ local function getNerdIcons()
         end
     end
     
-    -- 第二遍：按 ranges 顺序构建图标列表
     for _, range in ipairs(ranges) do
         for cp = range[1], range[2] do
             if cp >= 0xD800 and cp <= 0xDFFF then goto continue2 end
@@ -908,21 +1278,18 @@ local function getIconFile(icon_name)
     if not icon_name then return nil end
     if isNerdIcon(icon_name) then return icon_name end
     
-    -- 1. 如果是完整路径，直接检查
     if icon_name:sub(1,1) == "/" then
         if lfs.attributes(icon_name, "mode") == "file" then
             return icon_name
         end
     end
     
-    -- 2. 获取 koreader 根目录
     local ok, DataStorage = pcall(require, "datastorage")
     local base_dir = ""
     if ok and DataStorage then
         base_dir = DataStorage:getDataDir()
     end
     
-    -- 3. 当作相对路径查找（相对于 koreader/ 目录）
     if base_dir ~= "" then
         local full_path = base_dir .. "/" .. icon_name
         full_path = full_path:gsub("/%.", ""):gsub("/+", "/")
@@ -931,10 +1298,9 @@ local function getIconFile(icon_name)
         end
     end
     
-    -- 4. 最后，去掉所有路径，只保留文件名，去所有图标目录查找（和 IconWidget 一样）
     local filename = icon_name:match("([^/]+)$") or icon_name
     local dirs_to_check = {
-        getIconsDir(),                      -- koreader/icons/
+        getIconsDir(),
         "resources/icons/mdlight",
         "resources/icons",
         "resources",
@@ -1108,7 +1474,7 @@ function _InnerIconChooser:onMenuSelect(item)
             self.show_parent:onClose()
         end
         if self.onConfirm then
-            self.onConfirm(path)  -- ⭐ 直接用 path，不转绝对路径
+            self.onConfirm(path)
         end
         return true
     end
@@ -1132,12 +1498,11 @@ local IconBrowser = WidgetContainer:extend{
 
 function IconBrowser:init()
     self.dimen = Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
-    -- 删掉 toAbsolutePath 函数定义
     local paths_to_check = { self.path, "./resources/icons/mdlight", "./" }
     local final_path = nil
     for _, path in ipairs(paths_to_check) do
         if lfs.attributes(path, "mode") == "directory" then
-            final_path = path  -- ⭐ 直接用，不转绝对路径
+            final_path = path
             logger.info("[QuickActions] 使用图标目录:", final_path)
             break
         end
@@ -1297,7 +1662,6 @@ end
 -- ============================================================
 
 local function scanAllIconDirs(mode)
-    -- mode: nil 扫描所有目录, "system" 只扫描 resources/icons/mdlight/
     local all_files = {}
     local seen = {}
     
@@ -1306,10 +1670,10 @@ local function scanAllIconDirs(mode)
         dirs_to_scan = { "resources/icons/mdlight" }
     else
         dirs_to_scan = {
-            getIconsDir(),                      -- koreader/icons/
-            "resources/icons/mdlight",          -- KOReader 默认图标
-            "resources/icons",                  -- 备用
-            "resources",                        -- 资源根目录
+            getIconsDir(),
+            "resources/icons/mdlight",
+            "resources/icons",
+            "resources",
         }
     end
     
@@ -1340,10 +1704,6 @@ local function scanAllIconDirs(mode)
     return all_files
 end
 
--- ============================================================
--- 文件图标缓存（正常模式使用，避免重复扫描）
--- ============================================================
-
 local cached_file_icons = nil
 
 local function getFileIcons()
@@ -1357,10 +1717,6 @@ local function clearFileIconsCache()
     picker_cache = {} 
     cached_file_icons = nil
 end
-
--- ============================================================
--- 系统图标临时覆盖表（仅预览使用，未保存到配置）
--- ============================================================
 
 local system_temp_overrides = nil
 
@@ -1399,16 +1755,13 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
     local cols, rows, per_page, h_gap, v_gap
     local cell_w, cell_h, icon_sz, font_size, cell_pad, grid_w, grid_h
 
-    -- 提前声明 dialog 和 cur_page
     local dialog = nil
     local cur_page = 1
 
-    -- 筛选相关变量
     local filter_keyword = ""
     local filtered_icons_list = nil
     local search_dialog = nil
 
-    -- 获取显示列表（根据筛选关键词过滤）
     local function getDisplayList()
         if filter_keyword == "" then
             return icons_list
@@ -1442,7 +1795,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         return filtered_icons_list
     end
 
-    -- 重建网格
     local function rebuildPicker()
         filtered_icons_list = nil
         local display_list = getDisplayList()
@@ -1533,7 +1885,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             search_dialog = nil
         end
 
-        -- 每次按键触发
         local function onStrike()
             if search_dialog then
                 filter_keyword = search_dialog:getInputText() or ""
@@ -1547,7 +1898,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             title = _("筛选图标"),
             input = filter_keyword,
             input_hint = _("输入名称或码位..."),
-            strike_callback = onStrike,  -- 每次按键触发
+            strike_callback = onStrike,
             buttons = {
                 {
                     {
@@ -1580,7 +1931,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         temp_overrides = getSystemTempOverrides()
     end
 
-    -- ⭐ 检查缓存是否可用（屏幕尺寸未变化）
     local cache_valid = false
     if use_cache and mode ~= "system" then
         local cached = picker_cache[cache_key]
@@ -1612,13 +1962,10 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         end
     end
 
-    -- ⭐ 缓存无效或尺寸变化，需要重新构建
     if not cache_valid then
-        -- 如果缓存存在但尺寸变化，复用 icons_list
         if use_cache and mode ~= "system" then
             icons_list = picker_cache[cache_key].icons_list
         else
-            -- 构建 icons_list
             icons_list = {}
 
             if (not filter or filter == "nerd") and mode ~= "system" then
@@ -1663,7 +2010,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             end
         end
 
-        -- ⭐ 重新计算布局
         if sw > sh then
             cols = 9
             rows = 4
@@ -1692,7 +2038,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         frame_x = math.floor((sw - frame_w) / 2)
         frame_y = math.max(0, math.floor((sh - frame_h) / 2))
 
-        -- ⭐ 重新构建 page_widgets
         local display_list = getDisplayList()
         total_pages = math.max(1, math.ceil(#display_list / per_page))
         page_widgets = {}
@@ -1736,8 +2081,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
 
                         local border_color = Blitbuffer.COLOR_LIGHT_GRAY
                         local border_size = 1
-                        if mode == "system" and icon.is_overridden then
-                            border_color = Blitbuffer.COLOR_BLACK
+                        if mode == "system" and icon.is_overridden then                            border_color = Blitbuffer.COLOR_BLACK
                             border_size = 2
                         end
 
@@ -1765,7 +2109,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             page_widgets[p] = page_vg
         end
 
-        -- ⭐ 缓存完整数据
         if mode ~= "system" then
             picker_cache[cache_key] = {
                 icons_list = icons_list,
@@ -1797,7 +2140,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         end
     end
 
-    -- ===== 按钮行 =====
     local btn_row
     if mode == "system" then
         local all_overrides = getTable("qa_icon_overrides")
@@ -1989,7 +2331,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                     local gx, gy = ges.pos.x, ges.pos.y
                     local btn_hit = 80
 
-                    -- 左上角返回按钮
                     if gx >= frame_x + pad and gx < frame_x + pad + btn_hit
                             and gy >= frame_y + pad and gy < frame_y + pad + btn_hit then
                         UIManager:close(self)
@@ -2002,14 +2343,12 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         return true
                     end
 
-                    -- ⭐ 右上角搜索按钮
                     if gx >= frame_x + frame_w - pad - btn_hit and gx < frame_x + frame_w - pad
                             and gy >= frame_y + pad and gy < frame_y + pad + btn_hit then
                         showSearchDialog()
                         return true
                     end
 
-                    -- 按钮行点击
                     local btn_y = frame_y + pad + title_bar_h
                     if gy >= btn_y and gy < btn_y + button_bar_h then
                         if mode == "system" then
@@ -2098,7 +2437,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             local current_btn_width = math.floor(content_w / 4) - 5
                             local btn_index = 0
 
-                            -- 应用默认
                             if gx >= btn_x_start and gx < btn_x_start + current_btn_width then
                                 UIManager:close(self)
                                 UIManager:setDirty("all", "full")
@@ -2107,7 +2445,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
-                            -- 刷新
                             local x_start = btn_x_start + (current_btn_width + 8) * btn_index
                             if gx >= x_start and gx < x_start + current_btn_width then
                                 clearFileIconsCache()
@@ -2119,7 +2456,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
-                            -- 切换按钮（完整/自定义）
                             x_start = btn_x_start + (current_btn_width + 8) * btn_index
                             if gx >= x_start and gx < x_start + current_btn_width then
                                 UIManager:close(self)
@@ -2133,7 +2469,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
-                            -- 浏览文件
                             if not filter or filter == "file" then
                                 x_start = btn_x_start + (current_btn_width + 8) * btn_index
                                 if gx >= x_start and gx < x_start + current_btn_width then
@@ -2153,7 +2488,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         end
                     end
 
-                     -- 底部翻页
                     local bar_y = frame_y + pad + title_bar_h + button_bar_h + grid_h
                     if gy >= bar_y and gy < bar_y + footer_h then
                         local chev_w = 120
@@ -2170,7 +2504,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             return true
                         else
-                            -- 中间区域：弹出输入框，跳转到指定页
                             local dlg
                             dlg = InputDialog:new{
                                 title = _("跳转到第几页"),
@@ -2211,7 +2544,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         end
                     end
 
-                    -- 网格点击
                     local grid_start_x = frame_x + pad + (content_w - grid_w) / 2
                     local grid_y = frame_y + pad + title_bar_h + button_bar_h
                     if gx >= grid_start_x and gx < grid_start_x + grid_w
@@ -2295,7 +2627,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         local content_x = frame_x + pad
         local content_y = frame_y + pad
 
-        -- 标题
         local title_text
         if mode == "system" then
             title_text = _("系统图标预览")
@@ -2315,7 +2646,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         local title_w = title_tw:getSize().w
         title_tw:paintTo(bb, content_x + (content_w - title_w) / 2, content_y + 12)
 
-        -- 左上角返回
         local back_tw = TextWidget:new{
             text = "↶",
             face = Font:getFace("cfont", 24),
@@ -2323,7 +2653,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         }
         back_tw:paintTo(bb, content_x, content_y + 5)
 
-        -- ⭐ 右上角搜索图标（Nerd Font）
         local search_char = nerdIconChar("nerd:F002") or "?"
         local search_tw = TextWidget:new{
             text = search_char,
@@ -2332,11 +2661,9 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         }
         search_tw:paintTo(bb, content_x + content_w - 35, content_y + 5)
 
-        -- 按钮行
         local btn_y = content_y + title_bar_h
         btn_row:paintTo(bb, content_x, btn_y)
 
-        -- 网格
         local grid_start_x = content_x + (content_w - grid_w) / 2
         local grid_start_y = content_y + title_bar_h + button_bar_h
         local display_list = getDisplayList()
@@ -2352,7 +2679,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             page_widgets[cur_page]:paintTo(bb, grid_start_x, grid_start_y)
         end
 
-        -- 翻页
         if total_pages > 1 then
             local bar_y = grid_start_y + grid_h + (footer_h - 20) / 2
             local left_arrow = TextWidget:new{
@@ -2693,7 +3019,7 @@ local function replayPath(menu, path_record)
 end
 
 -- ============================================================
--- 动作执行（保持原样）
+-- 动作执行
 -- ============================================================
 
 local ACTION_REGISTRY = {}
@@ -2703,48 +3029,6 @@ local _wifi_optimistic = nil
 local function getNetworkMgr()
     local ok, nm = pcall(require, "ui/network/manager")
     return ok and nm or nil
-end
-
-local function executePluginAction(plugin_key, plugin_method)
-    local FM = require("apps/filemanager/filemanager")
-    local fm = FM and FM.instance
-    local RUI = require("apps/reader/readerui")
-    local reader = RUI and RUI.instance
-    
-    local plugin_inst = nil
-    local source = "fm"
-    
-    -- 1. 先查 FM
-    if fm and fm[plugin_key] then
-        plugin_inst = fm[plugin_key]
-        source = "fm"
-    end
-    
-    -- 2. 如果 FM 中没有，查 ReaderUI
-    if not plugin_inst and reader and reader[plugin_key] then
-        plugin_inst = reader[plugin_key]
-        source = "reader"
-    end
-    
-    if not plugin_inst then
-        UIManager:show(InfoMessage:new{
-            text = string.format(_("插件不可用: %s"), plugin_key),
-            timeout = 2,
-        })
-        return
-    end
-    
-    -- 3. 支持 _qa_launch（通过 addToMainMenu 提取的 callback）
-    if plugin_method == "_qa_launch" and type(plugin_inst._qa_launch) == "function" then
-        pcall(plugin_inst._qa_launch, plugin_inst)
-    elseif type(plugin_inst[plugin_method]) == "function" then
-        pcall(plugin_inst[plugin_method], plugin_inst)
-    else
-        UIManager:show(InfoMessage:new{
-            text = string.format(_("插件方法不可用: %s.%s"), plugin_key, plugin_method),
-            timeout = 2,
-        })
-    end
 end
 
 local function executeDispatcherAction(action_id, action_value, ctx)
@@ -2894,7 +3178,128 @@ local function getAction(id)
                 elseif cfg.action_type == "collection" and cfg.action_value then
                     executeCollectionAction(cfg.action_value)
                 elseif cfg.action_type == "plugin" and cfg.plugin_key then
-                    executePluginAction(cfg.plugin_key, cfg.plugin_method)
+    -- 子菜单：通过路径索引执行
+    if cfg.plugin_method == "submenu" and cfg.plugin_path_indices then
+        local mod = live_plugin(cfg.plugin_key)
+        if mod and type(mod.addToMainMenu) == "function" then
+            local entry = probe_menu_entry(mod, cfg.plugin_key)
+            if entry then
+                local current_items = {}
+                local sub = entry.sub_item_table
+                if sub == nil and type(entry.sub_item_table_func) == "function" then
+                    local ok, res = pcall(entry.sub_item_table_func, TOUCHMENU_STUB)
+                    if ok then sub = res end
+                end
+                if type(sub) == "table" then
+                    current_items = sub
+                end
+                
+                local found_item = nil
+                for i, idx in ipairs(cfg.plugin_path_indices) do
+                    if current_items and current_items[idx] then
+                        found_item = current_items[idx]
+                        if i < #cfg.plugin_path_indices then
+                            local sub2 = found_item.sub_item_table
+                            if sub2 == nil and type(found_item.sub_item_table_func) == "function" then
+                                local ok2, res2 = pcall(found_item.sub_item_table_func, TOUCHMENU_STUB)
+                                if ok2 then sub2 = res2 end
+                            end
+                            current_items = sub2
+                        end
+                    else
+                        found_item = nil
+                        break
+                    end
+                end
+                
+                if found_item and type(found_item.callback) == "function" then
+                    pcall(found_item.callback)
+                    if ctx and ctx.touch_menu then
+                        ctx.touch_menu:onClose()
+                    end
+                else
+                    UIManager:show(InfoMessage:new{
+                        text = string.format(_("找不到插件菜单项 (索引: %s)"), table.concat(cfg.plugin_path_indices or {}, ", ")),
+                        timeout = 2,
+                    })
+                end
+                return
+            end
+        end
+    end
+    
+    -- 检查是否是补丁（patch_ 开头的 key）
+    if string.sub(cfg.plugin_key, 1, 6) == "patch_" then
+        local full_name = string.sub(cfg.plugin_key, 7)
+        local menu_title = full_name
+        local last_dot = string.find(full_name, " · ", 1, true)
+        if last_dot then
+            menu_title = string.sub(full_name, last_dot + 3)
+        end
+        -- 去掉前后空格
+        menu_title = menu_title:gsub("^%s+", ""):gsub("%s+$", "")
+        
+        logger.info("[QuickActions] 执行补丁: menu_title=" .. menu_title)
+        
+        local FM = require("apps/filemanager/filemanager")
+        local fm = FM and FM.instance
+        local RUI = require("apps/reader/readerui")
+        local reader = RUI and RUI.instance
+        
+        local function findAndExecute(items)
+            if type(items) ~= "table" then return false end
+            for _, item in ipairs(items) do
+                if type(item) == "table" then
+                    local text = entry_text(item)
+                    if text == menu_title and type(item.callback) == "function" then
+                        logger.info("[QuickActions] 找到匹配，执行 callback")
+                        pcall(item.callback)
+                        if ctx and ctx.touch_menu then
+                            ctx.touch_menu:onClose()
+                        end
+                        return true
+                    end
+                    local sub = item.sub_item_table
+                    if sub == nil and type(item.sub_item_table_func) == "function" then
+                        local ok, res = pcall(item.sub_item_table_func, TOUCHMENU_STUB)
+                        if ok then sub = res end
+                    end
+                    if type(sub) == "table" then
+                        if findAndExecute(sub) then
+                            return true
+                        end
+                    end
+                end
+            end
+            return false
+        end
+        
+        local found = false
+        if fm and fm.menu and fm.menu.menu_items then
+            found = findAndExecute(fm.menu.menu_items)
+        end
+        if not found and reader and reader.menu and reader.menu.menu_items then
+            found = findAndExecute(reader.menu.menu_items)
+        end
+        if not found then
+            logger.info("[QuickActions] 找不到补丁: " .. menu_title)
+            UIManager:show(InfoMessage:new{
+                text = string.format(_("找不到补丁菜单项: %s"), menu_title),
+                timeout = 2,
+            })
+        end
+        return
+    end
+    
+    -- 普通插件
+    local method = cfg.plugin_method
+    if type(method) ~= "string" then
+        method = PluginScan.SENTINEL
+    end
+    if method == "submenu" then
+        method = PluginScan.SENTINEL
+    end
+    executePluginAction(cfg.plugin_key, method)
                 elseif cfg.action_type == "dispatcher" and cfg.dispatcher_action then
                     executeDispatcherAction(cfg.dispatcher_action, cfg.dispatcher_value or true, ctx)
                 elseif cfg.action_type == "menu" and cfg.menu_path then
@@ -2950,7 +3355,6 @@ local function getIconForAction(id)
     end
 
 if id == "toggle_cloze_mode" then
-    -- 检查当前是否有遮盖
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     if reader and reader.highlight then
@@ -2965,12 +3369,12 @@ if id == "toggle_cloze_mode" then
             end
         end
         if has_covered then
-            return "nerd:F070"  -- 已遮盖（锁定）
+            return "nerd:F070"
         else
-            return "nerd:F06E"  -- 未遮盖（解锁）
+            return "nerd:F06E"
         end
     end
-    return "nerd:F06E"  -- 默认解锁
+    return "nerd:F06E"
 end
 
     local action = getAction(id)
@@ -2993,7 +3397,6 @@ end
 -- 注册内置动作（如需删除可直接删除相应注册代码）
 -- ============================================================
 
--- 内置系统快捷操作
 registerAction("wifi", _("Wi-Fi"), "net-wifi.svg", true, "common", function(ctx)
     local NetworkMgr = getNetworkMgr()
     if not NetworkMgr then
@@ -3122,12 +3525,63 @@ registerAction("power", _("电源"), "nerd:F011", true, "common", function(ctx)
     UIManager:show(ButtonDialog:new{ width = math.floor(Screen:getWidth() * 0.42), buttons = buttons })
 end)
 
-registerAction("httpinspector", _("HTTP服务器"), "nerd:E701", true, "common", function()
+registerAction("httpinspector", _("HTTP服务器"), "nerd:E701", true, "common", function(ctx)
+    -- 获取当前UI
     local ui = require("apps/reader/readerui").instance
     if not ui then
         local FM = require("apps/filemanager/filemanager")
         ui = FM.instance
     end
+    
+    if not ui then
+        UIManager:show(Notification:new{
+            text = _("无法获取UI实例"),
+            timeout = 2,
+        })
+        return
+    end
+    
+    -- 查找菜单中的 httpinspector 菜单项，执行它的 callback
+    local menu_items = ui.menu and ui.menu.menu_items
+    if menu_items and menu_items.httpremote then
+        local sub_items = menu_items.httpremote.sub_item_table
+        if sub_items and #sub_items > 0 then
+            local item = sub_items[1]
+            if item and type(item.callback) == "function" then
+                local touchmenu_instance = nil
+                if ui.menu and ui.menu.menu_container and ui.menu.menu_container[1] then
+                    touchmenu_instance = ui.menu.menu_container[1]
+                end
+                -- 执行 callback（切换状态）
+                item.callback(touchmenu_instance)
+                
+                -- 关闭快捷操作面板
+                if ctx and ctx.touch_menu then
+                    ctx.touch_menu:onClose()
+                end
+                
+                -- 显示通知
+                local is_running = false
+                if ui and ui.httpinspector then
+                    is_running = ui.httpinspector:isRunning()
+                end
+                if is_running then
+                    UIManager:show(Notification:new{
+                        text = _("HTTP服务器已启动"),
+                        timeout = 2,
+                    })
+                else
+                    UIManager:show(Notification:new{
+                        text = _("HTTP服务器已关闭"),
+                        timeout = 2,
+                    })
+                end
+                return
+            end
+        end
+    end
+    
+    -- fallback 逻辑...
     if ui and ui.httpinspector then
         if ui.httpinspector:isRunning() then
             ui.httpinspector:stop()
@@ -3144,13 +3598,13 @@ registerAction("httpinspector", _("HTTP服务器"), "nerd:E701", true, "common",
         end
     else
         UIManager:show(InfoMessage:new{
-            text = _("未找到httpinspector插件实例，请检查插件是否已安装或者修改动作注册方法以适应更新后的插件"),
+            text = _("未找到httpinspector插件实例"),
             timeout = 2,
         })
     end
 end)
 
--- 字体列表
+
 registerAction("fontlist", "字体列表", "nerd:F031", false, "reader", function(ctx)
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
@@ -3182,7 +3636,6 @@ registerAction("fontlist", "字体列表", "nerd:F031", false, "reader", functio
     
     local current_font = reader.view.font_face or G_reader_settings:readSetting("cre_font")
     
-    -- 先创建 font_dialog 变量
     local font_dialog = nil
     
     for idx, face in ipairs(face_list) do
@@ -3198,7 +3651,6 @@ registerAction("fontlist", "字体列表", "nerd:F031", false, "reader", functio
         table.insert(buttons, {{
             text = display_name .. (is_checked and "  ✓" or ""),
             callback = function()
-                -- ⭐ 先关闭字体列表对话框
                 if font_dialog then
                     UIManager:close(font_dialog)
                     font_dialog = nil
@@ -3251,7 +3703,6 @@ registerAction("qa_new", _("新建快捷操作"), "nerd:F067", false, "common", 
 end)
 
 
---UI字体切换
 registerAction("ui_font_switch", _("切换UI字体"), "nerd:F30B", true, "common", function(ctx)
     showUIFontSwitcher()
 end)
@@ -3272,10 +3723,6 @@ registerAction("qa_add_button", _("添加按钮"), "nerd:F055", false, "common",
     showAddButtonMenu(touch_menu)
 end)
 
-
--- 内置外部插件及补丁快捷操作
-
--- 补丁：2-fm-cover.lua（封面视觉设置）
 registerAction("fmcoversettings", _("封面视觉设置"), "nerd:E8C8", false, "filemanager", function()
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
@@ -3291,15 +3738,12 @@ registerAction("fmcoversettings", _("封面视觉设置"), "nerd:E8C8", false, "
     end
 end)
 
--- 补丁：2-reader-clozemode.lua（遮盖模式）
 registerAction("toggle_cloze_mode", _("遮盖模式"), "nerd:F040", false, "reader", function(ctx)
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     
     if reader then
-        -- ⭐ 广播事件，让 clozemode 补丁自己处理
         UIManager:broadcastEvent(Event:new("Toggleclozemode"))
-        -- ⭐ 刷新面板，让图标变化
         if ctx and ctx.touch_menu then
             ctx.touch_menu:updateItems()
         end
@@ -3311,12 +3755,10 @@ registerAction("toggle_cloze_mode", _("遮盖模式"), "nerd:F040", false, "read
     end
 end)
 
--- 补丁：2-reading-insights-dashboard-v2（统计）
 registerAction("reading_insights", _("阅读统计"), "nerd:F073", false, "common", function(ctx)
     UIManager:broadcastEvent(Event:new("ShowReadingInsightsPopup"))
 end)
 
--- 插件：filebrowserplus.koplugin
 registerAction("filebrowserplus", _("FilebrowserPlus"), "nerd:F029", true, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
@@ -3342,7 +3784,6 @@ registerAction("filebrowserplus", _("FilebrowserPlus"), "nerd:F029", true, "comm
     end
 end)
 
--- 插件：zlibrary.koplugin
 registerAction("zlibrary_search", _("ZLibrary搜索"), "nerd:E76F", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
@@ -3364,7 +3805,6 @@ registerAction("zlibrary_search", _("ZLibrary搜索"), "nerd:E76F", false, "comm
     end
 end)
 
--- 插件：cloudlibrary.koplugin
 registerAction("cloudlibrary_autosync", _("CloudLibrary-省心同步"), "nerd:E33B", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
@@ -3386,7 +3826,6 @@ registerAction("cloudlibrary_autosync", _("CloudLibrary-省心同步"), "nerd:E3
     end
 end)
 
--- 插件：cloudlibrary.koplugin
 registerAction("cloudlibrary_batch_download_books", _("CloudLibrary-批量下载/删除"), "nerd:F409", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
@@ -3408,7 +3847,6 @@ registerAction("cloudlibrary_batch_download_books", _("CloudLibrary-批量下载
     end
 end)
 
--- 插件：cloudlibrary.koplugin
 registerAction("cloudlibrary_settings", _("CloudLibrary-云库设置"), "nerd:E33D", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
@@ -3434,7 +3872,6 @@ registerAction("cloudlibrary_settings", _("CloudLibrary-云库设置"), "nerd:E3
     end
 end)
 
--- 插件：annotationsviewer.koplugin
 registerAction("annotations_viewer", _("annotationsviewer"), "nerd:F040", false, "common", function()
     local UIManager = require("ui/uimanager")
     local Event = require("ui/event")
@@ -3444,7 +3881,6 @@ registerAction("annotations_viewer", _("annotationsviewer"), "nerd:F040", false,
     local reader = RUI and RUI.instance
     local fm = FM and FM.instance
     
-    -- 检查插件是否安装
     local has_plugin = false
     if reader and reader.annotationsviewer then
         has_plugin = true
@@ -3460,7 +3896,6 @@ registerAction("annotations_viewer", _("annotationsviewer"), "nerd:F040", false,
         return
     end
     
-    -- 执行操作
     if reader then
         UIManager:broadcastEvent(Event:new("ShowCurrentBookAnnotations"))
     else
@@ -3737,174 +4172,8 @@ local function getCollectionsList()
 end
 
 -- ============================================================
--- 插件发现辅助函数（在 getPluginsList 之前定义）
+-- 获取系统动作列表
 -- ============================================================
-
--- 检测插件调用方法
-local function _detectPluginMethod(val, key)
-    -- 尝试常见的方法名
-    for _, pfx in ipairs({"onShow","show","open","launch","onOpen"}) do
-        if type(val[pfx]) == "function" then return pfx end
-    end
-    
-    -- 尝试 on + 首字母大写
-    local cap = "on" .. key:sub(1,1):upper() .. key:sub(2)
-    if type(val[cap]) == "function" then return cap end
-    
-    -- 通过 addToMainMenu 提取 callback
-    if type(val.addToMainMenu) == "function" then
-        local probe = {}
-        local ok = pcall(function() val:addToMainMenu(probe) end)
-        if ok then
-            local entry = probe[key] or probe[val.name]
-            if entry and type(entry.callback) == "function" then
-                val._qa_launch = function() entry.callback() end
-                return "_qa_launch"
-            end
-        end
-    end
-    
-    return nil
-end
-
--- 获取插件显示名称
-local function _getPluginDisplayName(val, key)
-    local raw = (val.name or key):gsub("^filemanager", ""):gsub("^reader", "")
-    local display = raw:sub(1,1):upper() .. raw:sub(2)
-    if display == "" or display == key then
-        display = key:gsub("^filemanager", ""):gsub("^reader", "")
-        display = display:sub(1,1):upper() .. display:sub(2)
-    end
-    
-    -- 尝试从 addToMainMenu 获取更好的显示名称
-    if type(val.addToMainMenu) == "function" then
-        local probe = {}
-        local ok = pcall(function() val:addToMainMenu(probe) end)
-        if ok then
-            local entry = probe[key] or probe[val.name]
-            if entry and type(entry.text) == "string" and entry.text ~= "" then
-                display = entry.text
-            end
-        end
-    end
-    
-    return display
-end
-
--- ============================================================
--- 插件列表（在辅助函数之后定义）
--- ============================================================
-
-local function getPluginsList()
-    local FM = require("apps/filemanager/filemanager")
-    local fm = FM and FM.instance
-    local RUI = require("apps/reader/readerui")
-    local reader = RUI and RUI.instance
-    
-    local results = {}
-    local seen = {}
-    
-    -- 1. 预定义已知插件（兜底）
-    local known = {
-        -- FM 插件
-        { key = "history", method = "onShowHist", title = _("历史"), source = "fm" },
-        { key = "collections", method = "onShowCollList", title = _("收藏列表"), source = "fm" },
-        { key = "filesearcher", method = "onShowFileSearch", title = _("文件搜索"), source = "fm" },
-        { key = "dictionary", method = "onShowDictionaryLookup", title = _("词典"), source = "fm" },
-        { key = "folder_shortcuts", method = "onShowFolderShortcutsDialog", title = _("文件夹快捷方式"), source = "fm" },
-        { key = "bookinfo", method = "onShowBookInfo", title = _("书籍信息"), source = "fm" },
-        { key = "wikipedia", method = "onShowWikipediaLookup", title = _("维基百科查询"), source = "fm" },
-        -- ReaderUI 插件
-        { key = "bookmark", method = "onShowBookmarks", title = _("书签"), source = "reader" },
-        { key = "highlight", method = "onShowHighlights", title = _("高亮"), source = "reader" },
-        { key = "search", method = "onShowSearch", title = _("搜索"), source = "reader" },
-    }
-    
-    for _, entry in ipairs(known) do
-        local target = (entry.source == "reader") and reader or fm
-        if target then
-            local mod = target[entry.key]
-            if mod and type(mod[entry.method]) == "function" then
-                results[#results + 1] = {
-                    key = entry.key,
-                    method = entry.method,
-                    title = entry.title,
-                    source = entry.source,
-                }
-                seen[entry.key] = true
-            end
-        end
-    end
-    
-    -- 2. 动态扫描 FM 插件
-    if fm then
-        local native_keys = {
-            screenshot=true, menu=true, history=true, bookinfo=true, collections=true,
-            filesearcher=true, folder_shortcuts=true, languagesupport=true,
-            dictionary=true, wikipedia=true, devicestatus=true, devicelistener=true,
-            networklistener=true,
-        }
-        local fm_val_to_key = {}
-        for k, v in pairs(fm) do
-            if type(k) == "string" and type(v) == "table" then fm_val_to_key[v] = k end
-        end
-        
-        for i = 1, #fm do
-            local val = fm[i]
-            if type(val) ~= "table" or type(val.name) ~= "string" then goto continue_fm end
-            
-            local fm_key = fm_val_to_key[val]
-            if not fm_key or native_keys[fm_key] or seen[fm_key] then goto continue_fm end
-            
-            seen[fm_key] = true
-            local method = _detectPluginMethod(val, fm_key)
-            if method then
-                results[#results + 1] = {
-                    key = fm_key,
-                    method = method,
-                    title = _getPluginDisplayName(val, fm_key),
-                    source = "fm",
-                }
-            end
-            ::continue_fm::
-        end
-    end
-    
-    -- 3. 动态扫描 ReaderUI 插件
-    if reader then
-        local reader_native_keys = {
-            menu=true, bookmark=true, highlight=true, search=true,
-            progress=true, dictionary=true, wikipedia=true,
-        }
-        local reader_val_to_key = {}
-        for k, v in pairs(reader) do
-            if type(k) == "string" and type(v) == "table" then reader_val_to_key[v] = k end
-        end
-        
-        for i = 1, #reader do
-            local val = reader[i]
-            if type(val) ~= "table" or type(val.name) ~= "string" then goto continue_reader end
-            
-            local r_key = reader_val_to_key[val]
-            if not r_key or reader_native_keys[r_key] or seen[r_key] then goto continue_reader end
-            
-            seen[r_key] = true
-            local method = _detectPluginMethod(val, r_key)
-            if method then
-                results[#results + 1] = {
-                    key = r_key,
-                    method = method,
-                    title = _getPluginDisplayName(val, r_key),
-                    source = "reader",
-                }
-            end
-            ::continue_reader::
-        end
-    end
-    
-    table.sort(results, function(a, b) return a.title:lower() < b.title:lower() end)
-    return results
-end
 
 local function getDispatcherActions()
     local ok, DispatcherMod = pcall(require, "dispatcher")
@@ -4173,7 +4442,6 @@ local function showEditActionDialog(action_id, on_done)
 
         local pos, total = getCurrentPosition()
 
-        -- 构建最后一行
         local last_row = {
             { text = _("取消"), callback = function()
                 UIManager:close(active_dialog)
@@ -4181,10 +4449,6 @@ local function showEditActionDialog(action_id, on_done)
             end },
         }
 
-        -- 删除：内置动作没有删除，只有移除
-        -- 内置动作不需要删除按钮
-
-        -- 移除
         table.insert(last_row, { text = _("移除"), callback = function()
             if active_dialog then
                 local inputs = active_dialog:getFields()
@@ -4198,7 +4462,6 @@ local function showEditActionDialog(action_id, on_done)
             if on_done then on_done() end
         end })
 
-        -- 左移：有 pos 就显示，pos=1 时灰色
         if pos then
             table.insert(last_row, { text = "◀", enabled = (pos > 1), callback = function()
                 if active_dialog then
@@ -4225,7 +4488,6 @@ local function showEditActionDialog(action_id, on_done)
             end })
         end
 
-        -- 位置按钮：有 pos 才显示，点击打开排列按钮
         if pos then
             table.insert(last_row, { text = pos .. "/" .. total, callback = function()
                 UIManager:close(active_dialog)
@@ -4252,7 +4514,6 @@ local function showEditActionDialog(action_id, on_done)
             end })
         end
 
-        -- 右移：有 pos 就显示，pos=total 时灰色
         if pos then
             table.insert(last_row, { text = "▶", enabled = (pos < total), callback = function()
                 if active_dialog then
@@ -4521,7 +4782,6 @@ function showAddButtonMenu(touch_menu, on_back)
         }
     })
     
-    -- 全选/全不选按钮（放在显示滑块数值下面）
     local function getAllChecked()
         for _, action in ipairs(available) do
             if not slot_set[action.id] then
@@ -4541,7 +4801,6 @@ function showAddButtonMenu(touch_menu, on_back)
                 local new_slots = {}
                 
                 if is_all_checked then
-                    -- 全部取消：只保留不在available中的按钮（如前光、色温等）
                     for _, id in ipairs(current_slots) do
                         local is_available = false
                         for _, action in ipairs(available) do
@@ -4555,7 +4814,6 @@ function showAddButtonMenu(touch_menu, on_back)
                         end
                     end
                 else
-                    -- 全部添加：保留现有按钮，添加所有未选中的
                     for _, id in ipairs(current_slots) do
                         table.insert(new_slots, id)
                     end
@@ -4581,7 +4839,7 @@ function showAddButtonMenu(touch_menu, on_back)
             end,
         }
     })
-    table.insert(buttons, {})  -- 分隔线
+    table.insert(buttons, {})
     
     for i = 1, #available do
         local action = available[i]
@@ -4847,7 +5105,6 @@ end
 -- Dispatcher 相关辅助函数（提取到外面减少 upvalue）
 -- ============================================================
 
--- 关闭 Dispatcher 对话框
 local function closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
     if disp_picker then
         UIManager:close(disp_picker)
@@ -4864,10 +5121,8 @@ local function closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
     return disp_picker, sub_dialog, choice_dialog
 end
 
--- 构建 configurable 类型的子菜单
 local function buildConfigurableSubItems(item, def, touch_menu, buildSaveDialog, openDispatcherPickerFn, closeSettingsDialogFn, showSettingsMenuFn, getCurrentActionType, getCurrentActionVal1, getCurrentActionVal2, getCurrentActionTitle, getCurrentView, setCurrentActionType, setCurrentActionVal1, setCurrentActionVal2, setCurrentActionTitle, setCurrentView)
     return function()
-        -- ⭐ 关闭上一级菜单
         if sub_dialog then
             UIManager:close(sub_dialog)
             sub_dialog = nil
@@ -5035,7 +5290,6 @@ function showCustomQADialog(qa_id, on_done)
     local buildSaveDialog
     local openActionPicker
 
-    -- ★★★ 修改：commitQA 中 menu 类型不保存 view ★★★
     local function commitQA(final_label, path, collection, icon, plugin_key, plugin_method, dispatcher_action, dispatcher_value, menu_path, user_view)
         local list = getSetting("custom_list")
         if type(list) ~= "table" then list = {} end
@@ -5091,9 +5345,18 @@ function showCustomQADialog(qa_id, on_done)
             cfg_table.action_value = path
         elseif collection and collection ~= "" then
             cfg_table.action_value = collection
-        elseif plugin_key and plugin_key ~= "" then
-            cfg_table.plugin_key = plugin_key
+elseif plugin_key and plugin_key ~= "" then
+    cfg_table.plugin_key = plugin_key
+    if dispatcher_value and type(dispatcher_value) == "table" and dispatcher_value.type == "submenu" then
+        cfg_table.plugin_method = "submenu"
+        cfg_table.plugin_path_indices = dispatcher_value.path_indices
+    else
+        if type(plugin_method) == "string" then
             cfg_table.plugin_method = plugin_method
+        else
+            cfg_table.plugin_method = PluginScan.SENTINEL
+        end
+    end
         elseif dispatcher_action and dispatcher_action ~= "" then
             cfg_table.dispatcher_action = dispatcher_action
             cfg_table.dispatcher_value = dispatcher_value
@@ -5226,39 +5489,251 @@ function showCustomQADialog(qa_id, on_done)
                     coll_picker = ButtonDialog:new{ title = _("选择集合"), title_align = "center", buttons = coll_buttons }
                     UIManager:show(coll_picker)
                 end }},
-                {{ text = _("插件"), callback = function()
-                    UIManager:close(choice_dialog)
-                    choice_dialog = nil
-                    
-                    local plugins = getPluginsList()
-                    if #plugins == 0 then
-                        UIManager:show(InfoMessage:new{ text = _("没有可用的插件"), timeout = 3 })
-                        cancelActionPicker()
-                        return
+{{ text = _("插件或补丁"), callback = function()
+    UIManager:close(choice_dialog)
+    choice_dialog = nil
+    
+    local plugins = getPluginsList()
+    if #plugins == 0 then
+        UIManager:show(InfoMessage:new{ text = _("没有可用的插件或补丁"), timeout = 3 })
+        cancelActionPicker()
+        return
+    end
+    
+    -- 前向声明（先声明，后面再定义）
+    local showPluginSubMenu
+    local showPluginList
+    
+    -- 定义 showPluginSubMenu（递归显示子菜单，传递索引路径）
+    function showPluginSubMenu(plugin_key, plugin_title, items, level, parent_indices)
+        parent_indices = parent_indices or {}
+        local buttons = {}
+        
+        if level > 0 then
+            table.insert(buttons, {{
+                text = "◂ " .. _("返回"),
+                callback = function()
+                    if plugin_picker then
+                        UIManager:close(plugin_picker)
+                        plugin_picker = nil
                     end
+                    showPluginList()
+                end
+            }})
+            table.insert(buttons, {})
+        end
+        
+        for idx, item in ipairs(items or {}) do
+            if type(item) == "table" then
+                local text = entry_text(item) or _("未命名")
+                
+                local sub = item.sub_item_table
+                if sub == nil and type(item.sub_item_table_func) == "function" then
+                    local ok, res = pcall(item.sub_item_table_func, TOUCHMENU_STUB)
+                    if ok then sub = res end
+                end
+                
+                if type(sub) == "table" and #sub > 0 then
+                    local new_indices = {}
+                    for _, p in ipairs(parent_indices) do
+                        table.insert(new_indices, p)
+                    end
+                    table.insert(new_indices, idx)
                     
-                    table.sort(plugins, function(a, b) return a.title:lower() < b.title:lower() end)
-                    local plugin_buttons = {}
-                    for _, p in ipairs(plugins) do
-                        local _p = p
-                        plugin_buttons[#plugin_buttons + 1] = {{ text = p.title, callback = function()
-                            if plugin_picker then UIManager:close(plugin_picker); plugin_picker = nil end
-                            if choice_dialog then UIManager:close(choice_dialog); choice_dialog = nil end
+                    table.insert(buttons, {{
+                        text = text .. " ▸",
+                        callback = function()
+                            if plugin_picker then
+                                UIManager:close(plugin_picker)
+                                plugin_picker = nil
+                            end
+                            showPluginSubMenu(plugin_key, plugin_title .. " → " .. text, sub, level + 1, new_indices)
+                        end,
+                    }})
+                elseif type(item.callback) == "function" then
+                    local full_indices = {}
+                    for _, p in ipairs(parent_indices) do
+                        table.insert(full_indices, p)
+                    end
+                    table.insert(full_indices, idx)
+                    
+                    table.insert(buttons, {{
+                        text = text,
+                        callback = function()
+                            if plugin_picker then
+                                UIManager:close(plugin_picker)
+                                plugin_picker = nil
+                            end
+                            if choice_dialog then
+                                UIManager:close(choice_dialog)
+                                choice_dialog = nil
+                            end
                             current_action_type = "plugin"
-                            current_action_val1 = _p.key
-                            current_action_val2 = _p.method
-                            current_action_title = _p.title
+                            current_action_val1 = plugin_key
+                            current_action_val2 = {
+                                type = "submenu",
+                                path_indices = full_indices,
+                            }
+                            current_action_title = text
                             current_view = "common"
                             buildSaveDialog(true)
-                        end }}
+                        end,
+                    }})
+                end
+            end
+        end
+        
+        if #buttons == (level > 0 and 2 or 0) then
+            table.insert(buttons, {{
+                text = _("（无可用动作）"),
+                enabled = false,
+            }})
+        end
+        
+        plugin_picker = ButtonDialog:new{
+            title = level == 0 and _("选择插件或补丁") or plugin_title,
+            title_align = "center",
+            buttons = buttons,
+            width = math.floor(Screen:getWidth() * 0.7),
+            max_height = math.floor(Screen:getHeight() * 0.7),
+        }
+        UIManager:show(plugin_picker)
+    end
+    
+    -- 定义 showPluginList
+    function showPluginList()
+        local buttons = {}
+        
+        -- 先分类：插件和补丁分开
+        local plugin_buttons = {}
+        local patch_buttons = {}
+        
+        for _, p in ipairs(plugins) do
+            if p.is_patch then
+                -- 补丁：直接添加
+                table.insert(patch_buttons, {{
+                    text = p.display_title or p.title,
+                    callback = function()
+                        if plugin_picker then
+                            UIManager:close(plugin_picker)
+                            plugin_picker = nil
+                        end
+                        if choice_dialog then
+                            UIManager:close(choice_dialog)
+                            choice_dialog = nil
+                        end
+                        current_action_type = "plugin"
+                        current_action_val1 = p.key
+                        current_action_val2 = PluginScan.SENTINEL
+                        current_action_title = p.title
+                        current_view = "common"
+                        buildSaveDialog(true)
+                    end,
+                }})
+            else
+                -- 插件：原有逻辑
+                local mod = live_plugin(p.key)
+                if mod and type(mod.addToMainMenu) == "function" then
+                    local entry = probe_menu_entry(mod, p.key)
+                    if entry then
+                        local sub = entry.sub_item_table
+                        if sub == nil and type(entry.sub_item_table_func) == "function" then
+                            local ok, res = pcall(entry.sub_item_table_func, TOUCHMENU_STUB)
+                            if ok then sub = res end
+                        end
+                        
+                        if type(sub) == "table" and #sub > 0 then
+                            table.insert(plugin_buttons, {{
+                                text = p.title .. " ▸",
+                                callback = function()
+                                    if plugin_picker then
+                                        UIManager:close(plugin_picker)
+                                        plugin_picker = nil
+                                    end
+                                    showPluginSubMenu(p.key, p.title, sub, 1, {})
+                                end,
+                            }})
+                        elseif type(entry.callback) == "function" then
+                            table.insert(plugin_buttons, {{
+                                text = p.title,
+                                callback = function()
+                                    if plugin_picker then
+                                        UIManager:close(plugin_picker)
+                                        plugin_picker = nil
+                                    end
+                                    if choice_dialog then
+                                        UIManager:close(choice_dialog)
+                                        choice_dialog = nil
+                                    end
+                                    current_action_type = "plugin"
+                                    current_action_val1 = p.key
+                                    current_action_val2 = PluginScan.SENTINEL
+                                    current_action_title = p.title
+                                    current_view = "common"
+                                    buildSaveDialog(true)
+                                end,
+                            }})
+                        end
                     end
-                    plugin_buttons[#plugin_buttons + 1] = {{ text = _("返回"), callback = function()
-                        if plugin_picker then UIManager:close(plugin_picker); plugin_picker = nil end
-                        openActionPicker()
-                    end }}
-                    plugin_picker = ButtonDialog:new{ title = _("选择插件"), title_align = "center", buttons = plugin_buttons }
-                    UIManager:show(plugin_picker)
-                end }},
+                end
+            end
+        end
+        
+        -- 分别排序
+        table.sort(plugin_buttons, function(a, b)
+            return (a[1].text or ""):lower() < (b[1].text or ""):lower()
+        end)
+        table.sort(patch_buttons, function(a, b)
+            return (a[1].text or ""):lower() < (b[1].text or ""):lower()
+        end)
+        
+        -- 先添加插件，再添加补丁
+        for _, btn in ipairs(plugin_buttons) do
+            table.insert(buttons, btn)
+        end
+        
+        -- 插件和补丁之间加分隔线
+        if #plugin_buttons > 0 and #patch_buttons > 0 then
+            table.insert(buttons, {{
+                text = "──────────────────",
+                enabled = false,
+            }})
+        end
+        
+        for _, btn in ipairs(patch_buttons) do
+            table.insert(buttons, btn)
+        end
+        
+        if #buttons == 0 then
+            table.insert(buttons, {{
+                text = _("没有可用的插件动作"),
+                enabled = false,
+            }})
+        end
+        
+        table.insert(buttons, {{
+            text = _("返回"),
+            callback = function()
+                if plugin_picker then
+                    UIManager:close(plugin_picker)
+                    plugin_picker = nil
+                end
+                openActionPicker()
+            end
+        }})
+        
+        plugin_picker = ButtonDialog:new{
+            title = _("选择插件或补丁"),
+            title_align = "center",
+            buttons = buttons,
+            width = math.floor(Screen:getWidth() * 0.7),
+            max_height = math.floor(Screen:getHeight() * 0.7),
+        }
+        UIManager:show(plugin_picker)
+    end
+    
+    showPluginList()
+end }},
                 {{ text = _("系统动作"), callback = function()
                     openDispatcherPicker()
                 end }},
@@ -5391,7 +5866,6 @@ function showCustomQADialog(qa_id, on_done)
             { description = _("名称"), text = existing_label, hint = _("动作名称…") },
         }
 
-        -- 获取当前位置
         local function getCurrentPosition()
             if not qa_id then return nil, 0 end
             local slots = getQASlots()
@@ -5405,7 +5879,6 @@ function showCustomQADialog(qa_id, on_done)
 
         local pos, total = getCurrentPosition()
 
-        -- 构建最后一行
         local last_row = {
             { text = _("取消"), callback = function()
                 UIManager:close(active_dialog)
@@ -5416,7 +5889,6 @@ function showCustomQADialog(qa_id, on_done)
             end },
         }
 
-        -- 删除：只有自定义动作才有（qa_id 存在）
         if qa_id then
             table.insert(last_row, { text = _("删除"), callback = function()
                 if active_dialog then
@@ -5447,7 +5919,6 @@ function showCustomQADialog(qa_id, on_done)
             end })
         end
 
-        -- 左移
         if pos then
             table.insert(last_row, { text = "◀", enabled = (pos > 1), callback = function()
                 if active_dialog then
@@ -5474,7 +5945,6 @@ function showCustomQADialog(qa_id, on_done)
             end })
         end
 
-        -- 位置按钮
         if pos then
             table.insert(last_row, { text = pos .. "/" .. total, callback = function()
                 UIManager:close(active_dialog)
@@ -5501,7 +5971,6 @@ function showCustomQADialog(qa_id, on_done)
             end })
         end
 
-        -- 右移
         if pos then
             table.insert(last_row, { text = "▶", enabled = (pos < total), callback = function()
                 if active_dialog then
@@ -5528,7 +5997,6 @@ function showCustomQADialog(qa_id, on_done)
             end })
         end
 
-        -- 移除
         table.insert(last_row, { text = _("移除"), callback = function()
             if active_dialog then
                 local inputs = active_dialog:getFields()
@@ -5574,8 +6042,14 @@ function showCustomQADialog(qa_id, on_done)
             elseif current_action_type == "collection" then
                 collection = current_action_val1
             elseif current_action_type == "plugin" then
-                plugin_key = current_action_val1
-                plugin_method = current_action_val2
+    plugin_key = current_action_val1
+    -- 如果是子菜单（table），通过 dispatcher_value 传递
+    if type(current_action_val2) == "table" and current_action_val2.type == "submenu" then
+        dispatcher_value = current_action_val2
+        plugin_method = nil
+    else
+        plugin_method = current_action_val2
+    end
             elseif current_action_type == "dispatcher" then
                 dispatcher_action = current_action_val1
                 dispatcher_value = current_action_val2
@@ -5652,59 +6126,46 @@ function showCustomQADialog(qa_id, on_done)
         pcall(function() active_dialog:onShowKeyboard() end)
     end
 
-    -- 定义 openDispatcherPicker
     openDispatcherPicker = function(touch_menu)
-        if choice_dialog then
-            UIManager:close(choice_dialog)
-            choice_dialog = nil
-        end
+    if choice_dialog then
+        UIManager:close(choice_dialog)
+        choice_dialog = nil
+    end
 
-        local actions = getDispatcherActions()
-        if #actions == 0 then
-            UIManager:show(InfoMessage:new{ text = _("没有可用的系统动作"), timeout = 3 })
-            cancelActionPicker()
-            return
-        end
+    local actions = getDispatcherActions()
+    if #actions == 0 then
+        UIManager:show(InfoMessage:new{ text = _("没有可用的系统动作"), timeout = 3 })
+        cancelActionPicker()
+        return
+    end
 
+    local sections = {
+        { key = "general",     title = _("通用") },
+        { key = "device",      title = _("设备") },
+        { key = "screen",      title = _("屏幕和灯光") },
+        { key = "filemanager", title = _("文件浏览器") },
+        { key = "reader",      title = _("阅读器") },
+        { key = "rolling",     title = _("流式文档 (epub, fb2, txt…)") },
+        { key = "paging",      title = _("固定布局文档 (pdf, djvu, 图片…)") },
+    }
+
+    local sections_map = {}
+    for __, sec in ipairs(sections) do
+        sections_map[sec.key] = { title = sec.title, items = {} }
+    end
+
+    for __, action in ipairs(actions) do
         local ok, DispatcherMod = pcall(require, "dispatcher")
-        if not ok or not DispatcherMod then
-            UIManager:show(InfoMessage:new{ text = _("无法加载 Dispatcher"), timeout = 3 })
-            cancelActionPicker()
-            return
-        end
-
-        local settingsList
-        local fn_idx = 1
-        while true do
-            local name, val = debug.getupvalue(DispatcherMod.registerAction, fn_idx)
-            if not name then break end
-            if name == "settingsList" then settingsList = val end
-            fn_idx = fn_idx + 1
-        end
-
-        if not settingsList then
-            UIManager:show(InfoMessage:new{ text = _("无法获取系统动作列表"), timeout = 3 })
-            cancelActionPicker()
-            return
-        end
-
-        local sections = {
-            { key = "general",     title = _("通用") },
-            { key = "device",      title = _("设备") },
-            { key = "screen",      title = _("屏幕和灯光") },
-            { key = "filemanager", title = _("文件浏览器") },
-            { key = "reader",      title = _("阅读器") },
-            { key = "rolling",     title = _("流式文档 (epub, fb2, txt…)") },
-            { key = "paging",      title = _("固定布局文档 (pdf, djvu, 图片…)") },
-        }
-
-        local sections_map = {}
-        for __, sec in ipairs(sections) do
-            sections_map[sec.key] = { title = sec.title, items = {} }
-        end
-
-        for __, action in ipairs(actions) do
-            local def = settingsList[action.id]
+        if ok and DispatcherMod then
+            local settingsList
+            local fn_idx = 1
+            while true do
+                local name, val = debug.getupvalue(DispatcherMod.registerAction, fn_idx)
+                if not name then break end
+                if name == "settingsList" then settingsList = val end
+                fn_idx = fn_idx + 1
+            end
+            local def = settingsList and settingsList[action.id]
             if def and def.category then
                 local section_key = "general"
                 for ___, sec in ipairs(sections) do
@@ -5721,213 +6182,212 @@ function showCustomQADialog(qa_id, on_done)
                 })
             end
         end
+    end
 
-        local section_buttons = {}
+    local section_buttons = {}
 
-        for __, sec in ipairs(sections) do
-            local items = sections_map[sec.key].items
-            if #items > 0 then
-                table.sort(items, function(a, b) return a.title:lower() < b.title:lower() end)
+    for __, sec in ipairs(sections) do
+        local items = sections_map[sec.key].items
+        if #items > 0 then
+            table.sort(items, function(a, b) return a.title:lower() < b.title:lower() end)
 
-                local action_buttons = {}
+            local action_buttons = {}
 
-                table.insert(action_buttons, {{
-                    text = "⚙️ " .. _("打开主菜单"),
-                    callback = function()
-                        if sub_dialog then
-                            UIManager:close(sub_dialog)
-                            sub_dialog = nil
-                        end
-                        if disp_picker then
-                            UIManager:close(disp_picker)
-                            disp_picker = nil
-                        end
-                        closeSettingsDialog()
-                        showSettingsMenu(touch_menu)
+            table.insert(action_buttons, {{
+                text = "⚙️ " .. _("打开主菜单"),
+                callback = function()
+                    if sub_dialog then
+                        UIManager:close(sub_dialog)
+                        sub_dialog = nil
                     end
-                }})
-
-                table.insert(action_buttons, {{
-                    text = "◂◂ " .. _("返回编辑框"),
-                    callback = function()
-                        if sub_dialog then
-                            UIManager:close(sub_dialog)
-                            sub_dialog = nil
-                        end
-                        if disp_picker then
-                            UIManager:close(disp_picker)
-                            disp_picker = nil
-                        end
-                        buildSaveDialog(false)
+                    if disp_picker then
+                        UIManager:close(disp_picker)
+                        disp_picker = nil
                     end
-                }})
-
-                table.insert(action_buttons, {{
-                    text = "◂ " .. _("返回"),
-                    callback = function()
-                        if sub_dialog then
-                            UIManager:close(sub_dialog)
-                            sub_dialog = nil
-                        end
-                        openDispatcherPicker(touch_menu)
-                    end
-                }})
-
-                table.insert(action_buttons, {})
-
-                for ___, item in ipairs(items) do
-                    local _item = item
-                    local category = item.category
-                    local def = item.def
-
-                    if category == "none" or category == "arg" then
-                        table.insert(action_buttons, {{
-                            text = item.title,
-                            callback = function()
-                                disp_picker, sub_dialog, choice_dialog = closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
-                                current_action_type = "dispatcher"
-                                current_action_val1 = _item.id
-                                current_action_val2 = true
-                                current_action_title = _item.title
-                                if def and def.filemanager then
-                                    current_view = "filemanager"
-                                elseif def and (def.reader or def.rolling or def.paging) then
-                                    current_view = "reader"
-                                else
-                                    current_view = "common"
-                                end
-                                buildSaveDialog(true)
-                            end,
-                        }})
-                    elseif category == "absolutenumber" or category == "incrementalnumber" then
-                        table.insert(action_buttons, {{
-                            text = item.title,
-                            callback = function()
-                                if sub_dialog then UIManager:close(sub_dialog); sub_dialog = nil end
-                                local spin = SpinWidget:new{
-                                    title_text = _item.title,
-                                    value = def.default or def.min or 0,
-                                    value_min = def.min or 0,
-                                    value_max = def.max or 100,
-                                    value_step = def.step or 1,
-                                    unit = def.unit,
-                                    callback = function(spin)
-                                        disp_picker, sub_dialog, choice_dialog = closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
-                                        current_action_type = "dispatcher"
-                                        current_action_val1 = _item.id
-                                        current_action_val2 = spin.value
-                                        current_action_title = _item.title .. ": " .. tostring(spin.value)
-                                        if def and def.filemanager then
-                                            current_view = "filemanager"
-                                        elseif def and (def.reader or def.rolling or def.paging) then
-                                            current_view = "reader"
-                                        else
-                                            current_view = "common"
-                                        end
-                                        buildSaveDialog(true)
-                                    end,
-                                }
-                                UIManager:show(spin)
-                            end,
-                        }})
-elseif category == "string" or category == "configurable" then
-    table.insert(action_buttons, {{
-        text = item.title,
-        callback = buildConfigurableSubItems(
-            _item, def, touch_menu, 
-            buildSaveDialog, openDispatcherPicker, closeSettingsDialog, showSettingsMenu,
-            -- 传入 getter/setter
-            function() return current_action_type end,
-            function() return current_action_val1 end,
-            function() return current_action_val2 end,
-            function() return current_action_title end,
-            function() return current_view end,
-            function(v) current_action_type = v end,
-            function(v) current_action_val1 = v end,
-            function(v) current_action_val2 = v end,
-            function(v) current_action_title = v end,
-            function(v) current_view = v end
-              )
-    }})
-end
+                    closeSettingsDialog()
+                    showSettingsMenu(touch_menu)
                 end
+            }})
 
-                -- 处理 section_buttons
-                if #action_buttons > 4 then
-                    table.insert(section_buttons, {{
-                        text = sec.title,
+            table.insert(action_buttons, {{
+                text = "◂◂ " .. _("返回编辑框"),
+                callback = function()
+                    if sub_dialog then
+                        UIManager:close(sub_dialog)
+                        sub_dialog = nil
+                    end
+                    if disp_picker then
+                        UIManager:close(disp_picker)
+                        disp_picker = nil
+                    end
+                    buildSaveDialog(false)
+                end
+            }})
+
+            table.insert(action_buttons, {{
+                text = "◂ " .. _("返回"),
+                callback = function()
+                    if sub_dialog then
+                        UIManager:close(sub_dialog)
+                        sub_dialog = nil
+                    end
+                    openDispatcherPicker(touch_menu)
+                end
+            }})
+
+            table.insert(action_buttons, {})
+
+            for ___, item in ipairs(items) do
+                local _item = item
+                local category = item.category
+                local def = item.def
+
+                if category == "none" or category == "arg" then
+                    table.insert(action_buttons, {{
+                        text = item.title,
                         callback = function()
-                            if disp_picker then
-                                UIManager:close(disp_picker)
-                                disp_picker = nil
+                            disp_picker, sub_dialog, choice_dialog = closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
+                            current_action_type = "dispatcher"
+                            current_action_val1 = _item.id
+                            current_action_val2 = true
+                            current_action_title = _item.title
+                            if def and def.filemanager then
+                                current_view = "filemanager"
+                            elseif def and (def.reader or def.rolling or def.paging) then
+                                current_view = "reader"
+                            else
+                                current_view = "common"
                             end
-                           sub_dialog = ButtonDialog:new{
-                                title = sec.title,
-                                title_align = "center",
-                                buttons = action_buttons,
-                                width = math.floor(Screen:getWidth() * 0.7),
-                            }
-                            UIManager:show(sub_dialog)
+                            buildSaveDialog(true)
                         end,
                     }})
-                else
-                    for _, btn in ipairs(action_buttons) do
-                        table.insert(section_buttons, btn)
-                    end
+                elseif category == "absolutenumber" or category == "incrementalnumber" then
+                    table.insert(action_buttons, {{
+                        text = item.title,
+                        callback = function()
+                            if sub_dialog then UIManager:close(sub_dialog); sub_dialog = nil end
+                            local spin = SpinWidget:new{
+                                title_text = _item.title,
+                                value = def.default or def.min or 0,
+                                value_min = def.min or 0,
+                                value_max = def.max or 100,
+                                value_step = def.step or 1,
+                                unit = def.unit,
+                                callback = function(spin)
+                                    disp_picker, sub_dialog, choice_dialog = closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
+                                    current_action_type = "dispatcher"
+                                    current_action_val1 = _item.id
+                                    current_action_val2 = spin.value
+                                    current_action_title = _item.title .. ": " .. tostring(spin.value)
+                                    if def and def.filemanager then
+                                        current_view = "filemanager"
+                                    elseif def and (def.reader or def.rolling or def.paging) then
+                                        current_view = "reader"
+                                    else
+                                        current_view = "common"
+                                    end
+                                    buildSaveDialog(true)
+                                end,
+                            }
+                            UIManager:show(spin)
+                        end,
+                    }})
+                elseif category == "string" or category == "configurable" then
+                    table.insert(action_buttons, {{
+                        text = item.title,
+                        callback = buildConfigurableSubItems(
+                            _item, def, touch_menu, 
+                            buildSaveDialog, openDispatcherPicker, closeSettingsDialog, showSettingsMenu,
+                            function() return current_action_type end,
+                            function() return current_action_val1 end,
+                            function() return current_action_val2 end,
+                            function() return current_action_title end,
+                            function() return current_view end,
+                            function(v) current_action_type = v end,
+                            function(v) current_action_val1 = v end,
+                            function(v) current_action_val2 = v end,
+                            function(v) current_action_title = v end,
+                            function(v) current_view = v end
+                        )
+                    }})
+                end
+            end
+
+            if #action_buttons > 4 then
+                table.insert(section_buttons, {{
+                    text = sec.title,
+                    callback = function()
+                        if disp_picker then
+                            UIManager:close(disp_picker)
+                            disp_picker = nil
+                        end
+                        sub_dialog = ButtonDialog:new{
+                            title = sec.title,
+                            title_align = "center",
+                            buttons = action_buttons,
+                            width = math.floor(Screen:getWidth() * 0.7),
+                        }
+                        UIManager:show(sub_dialog)
+                    end,
+                }})
+            else
+                for _, btn in ipairs(action_buttons) do
+                    table.insert(section_buttons, btn)
                 end
             end
         end
-
-        local final_buttons = {}
-
-        table.insert(final_buttons, {{
-            text = "⚙️ " .. _("打开主菜单"),
-            callback = function()
-                if disp_picker then
-                    UIManager:close(disp_picker)
-                    disp_picker = nil
-                end
-                closeSettingsDialog()
-                showSettingsMenu(touch_menu)
-            end
-        }})
-
-        table.insert(final_buttons, {{
-            text = "◂◂ " .. _("返回编辑框"),
-            callback = function()
-                if disp_picker then
-                    UIManager:close(disp_picker)
-                    disp_picker = nil
-                end
-                buildSaveDialog(false)
-            end
-        }})
-
-        table.insert(final_buttons, {{
-            text = "◂ " .. _("返回"),
-            callback = function()
-                if disp_picker then
-                    UIManager:close(disp_picker)
-                    disp_picker = nil
-                end
-                openActionPicker()
-            end
-        }})
-
-        table.insert(final_buttons, {})
-
-        for __, btn in ipairs(section_buttons) do
-            table.insert(final_buttons, btn)
-        end
-
-        disp_picker = ButtonDialog:new{
-            title = _("系统动作"),
-            title_align = "center",
-            buttons = final_buttons,
-            width = math.floor(Screen:getWidth() * 0.7),
-        }
-        UIManager:show(disp_picker)
     end
+
+    local final_buttons = {}
+
+    table.insert(final_buttons, {{
+        text = "⚙️ " .. _("打开主菜单"),
+        callback = function()
+            if disp_picker then
+                UIManager:close(disp_picker)
+                disp_picker = nil
+            end
+            closeSettingsDialog()
+            showSettingsMenu(touch_menu)
+        end
+    }})
+
+    table.insert(final_buttons, {{
+        text = "◂◂ " .. _("返回编辑框"),
+        callback = function()
+            if disp_picker then
+                UIManager:close(disp_picker)
+                disp_picker = nil
+            end
+            buildSaveDialog(false)
+        end
+    }})
+
+    table.insert(final_buttons, {{
+        text = "◂ " .. _("返回"),
+        callback = function()
+            if disp_picker then
+                UIManager:close(disp_picker)
+                disp_picker = nil
+            end
+            openActionPicker()
+        end
+    }})
+
+    table.insert(final_buttons, {})
+
+    for __, btn in ipairs(section_buttons) do
+        table.insert(final_buttons, btn)
+    end
+
+    disp_picker = ButtonDialog:new{
+        title = _("系统动作"),
+        title_align = "center",
+        buttons = final_buttons,
+        width = math.floor(Screen:getWidth() * 0.7),
+    }
+    UIManager:show(disp_picker)
+end
 
     if not qa_id then
         buildSaveDialog(false)
@@ -5941,7 +6401,6 @@ end
 -- ============================================================
 
 local function resetAllSettings(touch_menu)
-    -- 清空所有缓存
     picker_cache = {}
     cached_file_icons = nil
     system_temp_overrides = nil
@@ -6121,8 +6580,8 @@ local root_menu_items = {
                        })
                    end
                end,
-               nil,  -- saved_icon
-               "file"  -- ⭐ 只显示文件图标
+               nil,
+               "file"
            )
        end,
     },
@@ -6326,11 +6785,9 @@ local root_menu_items = {
             setBool("qa_filter_initialized", default_config.qa_filter_initialized)
             setTable("qa_icon_overrides", default_config.qa_icon_overrides or {})
             setTable("ui_font_overrides", default_config.ui_font_overrides or {}) 
-            -- 清空缓存
             picker_cache = {}
             cached_file_icons = nil
             system_temp_overrides = nil
-            -- 应用字体
             applyUIFontChanges()
             refreshQuickPanel(touch_menu)
             UIManager:show(Notification:new{
@@ -6898,7 +7355,6 @@ function TouchMenu:updateItems(target_page, target_item_id)
         self._qs_refs = nil
         return _orig_updateItems(self, target_page, target_item_id)
     end
-    -- ⭐ 修复：设置 page 和 page_num，防止 onNextPage 报错
     self.page = 1
     self.page_num = 1
     
@@ -7069,7 +7525,7 @@ end
 -- ============================================================
 
 local QS_PANEL_TAB = {
-    icon = getString("qa_tab_icon"),   -- "quickactions"
+    icon = getString("qa_tab_icon"),
     remember = false,
     _qs_panel = true,
 }
