@@ -1,5 +1,5 @@
 -- 2-quickactions.lua - Quick Actions Panel for KOReader
--- QA standalone patch: integrated menu recording, system actions (5 action types), custom button icons, KOReader system icon replacement, KOReader system UI font replacement
+-- QA standalone patch: integrated menu recording, system actions, 5 action types, custom button icons, replace KOReader system icons, replace KOReader system UI fonts
 -- Installation: place in koreader/patches/ directory
 -- Uninstallation: delete this file, also delete koreader/settings/quickactions.lua (config file, optional)
 
@@ -194,7 +194,7 @@ local function loadConfig()
         return CONFIG_DATA
     end
     
-    logger.info("[QuickActions] Configuration file not found, creating default config")
+    logger.info("[QuickActions] Configuration file does not exist, creating default config")
     CONFIG_DATA = DEFAULT_CONFIG
     saveConfig()
     return CONFIG_DATA
@@ -344,18 +344,418 @@ local function getButtonSizePct()
 end
 
 -- ============================================================
--- UI Font switching feature (3 font types, automatically replaces all corresponding keys)
+-- ============================================================
+-- Built-in PluginScan (standalone implementation, no external module dependency)
 -- ============================================================
 
--- Declare functions first to resolve circular references
+local PluginScan = {}
+
+PluginScan.SENTINEL = "__menu_callback"
+PluginScan.SUBMENU = "__menu_submenu"
+
+local EXCLUDED_PLUGINS = {
+    zen_ui = true,
+}
+
+local LAUNCH_METHODS = { "onShow", "show", "open", "launch", "onOpen" }
+
+local function plugin_loader()
+    local ok, loader = pcall(require, "pluginloader")
+    return ok and loader or nil
+end
+
+local function live_uis()
+    local out = {}
+    local fm_mod = package.loaded["apps/filemanager/filemanager"]
+    if fm_mod and fm_mod.instance then
+        out[#out + 1] = fm_mod.instance
+    end
+    local reader_mod = package.loaded["apps/reader/readerui"]
+    if reader_mod and reader_mod.instance then
+        out[#out + 1] = reader_mod.instance
+    end
+    return out
+end
+
+local function enabled_plugin_names()
+    local names = {}
+    local loader = plugin_loader()
+    if not (loader and type(loader.loadPlugins) == "function") then
+        return names
+    end
+    local ok, enabled = pcall(loader.loadPlugins, loader)
+    if not ok or type(enabled) ~= "table" then
+        return names
+    end
+    for _i, plugin in ipairs(enabled) do
+        if type(plugin) == "table" and type(plugin.name) == "string" then
+            names[plugin.name] = true
+        end
+    end
+    names.zen_ui = nil
+    return names
+end
+
+local function is_callable(value)
+    if type(value) == "function" then return true end
+    local mt = type(value) == "table" and getmetatable(value) or nil
+    return type(mt) == "table" and type(mt.__call) == "function"
+end
+
+local function probe_menu_entry(mod, key)
+    if type(mod.addToMainMenu) ~= "function" then return nil end
+    local probe = {}
+    local ok = pcall(mod.addToMainMenu, mod, probe)
+    if not ok then return nil end
+    local entry = probe[key]
+    if entry == nil and type(mod.name) == "string" then
+        entry = probe[mod.name]
+    end
+    if entry == nil then
+        local only, count = nil, 0
+        for _k, value in pairs(probe) do
+            if type(value) == "table" then
+                count = count + 1
+                only = value
+            end
+        end
+        if count == 1 then entry = only end
+    end
+    return type(entry) == "table" and entry or nil
+end
+
+local function text_without_glyph(text)
+    if type(text) ~= "string" then return nil end
+    return (text:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function entry_text(entry)
+    if type(entry) ~= "table" then return nil end
+    if type(entry.text_func) == "function" then
+        local ok, text = pcall(entry.text_func)
+        if ok then return text_without_glyph(text) end
+    end
+    return text_without_glyph(entry.text)
+end
+
+local function find_method(mod, key)
+    for _i, method in ipairs(LAUNCH_METHODS) do
+        if is_callable(mod[method]) then return method end
+    end
+    local camel = "on" .. key:sub(1, 1):upper() .. key:sub(2)
+    if is_callable(mod[camel]) then return camel end
+    local entry = probe_menu_entry(mod, key)
+    if entry then
+        if type(entry.callback) == "function" then
+            return PluginScan.SENTINEL
+        end
+        if entry.sub_item_table ~= nil or entry.sub_item_table_func ~= nil then
+            return PluginScan.SUBMENU
+        end
+    end
+end
+
+local function add_candidate(out, seen, key, mod)
+    if type(key) ~= "string" or key == "" or EXCLUDED_PLUGINS[key] or seen[key]
+            or type(mod) ~= "table" then
+        return
+    end
+    local method = find_method(mod, key)
+    if not method then return end
+    seen[key] = true
+    local entry = probe_menu_entry(mod, key)
+    local title = entry_text(entry)
+    if not title or title == "" then
+        title = key:sub(1, 1):upper() .. key:sub(2)
+    end
+    out[#out + 1] = { key = key, method = method, title = title }
+end
+
+function PluginScan.scan()
+    local ok, results = pcall(function()
+        local out, seen = {}, {}
+        local loader = plugin_loader()
+        
+        -- Scan plugins (original)
+        if loader and type(loader.loaded_plugins) == "table" then
+            for key, mod in pairs(loader.loaded_plugins) do
+                add_candidate(out, seen, key, mod)
+            end
+        end
+
+        local names = enabled_plugin_names()
+        if loader and type(loader.getPluginInstance) == "function" then
+            for key in pairs(names) do
+                local ok_plugin, plugin = pcall(loader.getPluginInstance, loader, key)
+                if ok_plugin then
+                    add_candidate(out, seen, key, plugin)
+                end
+            end
+        end
+
+        for _i, ui in ipairs(live_uis()) do
+            for key in pairs(names) do
+                add_candidate(out, seen, key, ui[key])
+            end
+        end
+        
+-- ============================================================
+-- New: Scan patches (directly scan menu_items)
+-- ============================================================
+local FM = require("apps/filemanager/filemanager")
+local fm = FM and FM.instance
+local RUI = require("apps/reader/readerui")
+local reader = RUI and RUI.instance
+
+local function scanPatchItems(items, parent_title)
+    if type(items) ~= "table" then return end
+    for _, item in ipairs(items) do
+        if type(item) == "table" then
+            local text = entry_text(item)
+            
+            -- Check if there is a submenu
+            local sub = item.sub_item_table
+            if sub == nil and type(item.sub_item_table_func) == "function" then
+                local ok, res = pcall(item.sub_item_table_func, TOUCHMENU_STUB)
+                if ok then sub = res end
+            end
+            
+            if type(sub) == "table" and #sub > 0 then
+                -- Has submenu: recursively scan, passing current text as parent
+                scanPatchItems(sub, text)
+            elseif text and type(item.callback) == "function" then
+                -- Executable item: combine parent name + current name
+                local display_title = parent_title and (parent_title .. " · " .. text) or text
+                local patch_key = "patch_" .. display_title
+                if not seen[patch_key] then
+                    seen[patch_key] = true
+                    table.insert(out, {
+                        key = patch_key,
+                        method = PluginScan.SENTINEL,
+                        title = text,
+                        display_title = display_title,
+                        is_patch = true,
+                    })
+                end
+            end
+        end
+    end
+end
+
+if fm and fm.menu and fm.menu.menu_items then
+    scanPatchItems(fm.menu.menu_items)
+end
+
+if reader and reader.menu and reader.menu.menu_items then
+    scanPatchItems(reader.menu.menu_items)
+end        
+        table.sort(out, function(a, b) return a.title < b.title end)
+        return out
+    end)
+    return ok and results or {}
+end
+
+local function live_plugin(key)
+    local loader = plugin_loader()
+    local loaded = loader and loader.loaded_plugins
+    if type(loaded) == "table" and type(loaded[key]) == "table" then
+        return loaded[key]
+    end
+    if loader and type(loader.getPluginInstance) == "function" then
+        local ok, plugin = pcall(loader.getPluginInstance, loader, key)
+        if ok and type(plugin) == "table" then
+            return plugin
+        end
+    end
+    for _i, ui in ipairs(live_uis()) do
+        if type(ui[key]) == "table" then
+            return ui[key]
+        end
+    end
+end
+
+function PluginScan.exists(key, method)
+    if type(key) ~= "string" or type(method) ~= "string" then return false end
+    local mod = live_plugin(key)
+    if type(mod) ~= "table" then return false end
+    if method == PluginScan.SENTINEL or method == PluginScan.SUBMENU then
+        return type(mod.addToMainMenu) == "function"
+    end
+    return is_callable(mod[method])
+end
+
+local TOUCHMENU_STUB = {
+    closeMenu = function() end,
+    onClose = function() end,
+    updateItems = function() end,
+    handleEvent = function() return false end,
+}
+
+function PluginScan.resolve(key, method)
+    -- ============================================================
+    -- New: Handle patches (keys starting with patch_)
+    -- ============================================================
+    if type(key) == "string" and string.sub(key, 1, 6) == "patch_" then
+        -- Extract menu name
+        local full_name = string.sub(key, 7)
+        local menu_title = full_name
+        local last_dot = string.find(full_name, " · ", 1, true)
+        if last_dot then
+            menu_title = string.sub(full_name, last_dot + 3)
+        end
+            menu_title = menu_title:gsub("^%s+", ""):gsub("%s+$", "")
+        
+        -- Search in menu
+        local FM = require("apps/filemanager/filemanager")
+        local fm = FM and FM.instance
+        local RUI = require("apps/reader/readerui")
+        local reader = RUI and RUI.instance
+        
+        local function findCallback(items)
+            if type(items) ~= "table" then return nil end
+            for _, item in ipairs(items) do
+                if type(item) == "table" then
+                    local text = entry_text(item)
+                    if text == menu_title and type(item.callback) == "function" then
+                        return item.callback
+                    end
+                    local sub = item.sub_item_table
+                    if sub == nil and type(item.sub_item_table_func) == "function" then
+                        local ok, res = pcall(item.sub_item_table_func, TOUCHMENU_STUB)
+                        if ok then sub = res end
+                    end
+                    if type(sub) == "table" then
+                        local cb = findCallback(sub)
+                        if cb then return cb end
+                    end
+                end
+            end
+            return nil
+        end
+        
+        local callback = nil
+        if fm and fm.menu and fm.menu.menu_items then
+            callback = findCallback(fm.menu.menu_items)
+        end
+        if not callback and reader and reader.menu and reader.menu.menu_items then
+            callback = findCallback(reader.menu.menu_items)
+        end
+        
+        if callback then
+            return function()
+                return callback(TOUCHMENU_STUB)
+            end
+        else
+            return nil
+        end
+    end
+    
+    -- Original logic: plugin
+    if type(key) ~= "string" or type(method) ~= "string" then return nil end
+    local mod = live_plugin(key)
+    if type(mod) ~= "table" then return nil end
+    if method == PluginScan.SENTINEL then
+        local entry = probe_menu_entry(mod, key)
+        local callback = entry and entry.callback
+        if type(callback) ~= "function" then return nil end
+        return function()
+            return callback(TOUCHMENU_STUB)
+        end
+    end
+    if method == PluginScan.SUBMENU then
+        local entry = probe_menu_entry(mod, key)
+        if not entry then return nil end
+        local sub_items = entry.sub_item_table
+        if sub_items == nil and type(entry.sub_item_table_func) == "function" then
+            local ok_sub, res = pcall(entry.sub_item_table_func, TOUCHMENU_STUB)
+            if ok_sub then sub_items = res end
+        end
+        if type(sub_items) ~= "table" then return nil end
+        local title = type(entry.text) == "string" and entry.text or key
+        return function()
+            local ok_host, menu_host = pcall(require, "modules/menu/app_launcher/menu_host")
+            if ok_host and menu_host and type(menu_host.show) == "function" then
+                return menu_host.show{
+                    title = title,
+                    item_table = sub_items,
+                }
+            else
+                local buttons = {}
+                for _, item in ipairs(sub_items) do
+                    local cb = item.callback
+                    if type(item.text_func) == "function" then
+                        buttons[#buttons + 1] = {{
+                            text = item.text_func(),
+                            callback = function()
+                                if cb then cb() end
+                            end,
+                        }}
+                    elseif type(item.text) == "string" then
+                        buttons[#buttons + 1] = {{
+                            text = item.text,
+                            callback = function()
+                                if cb then cb() end
+                            end,
+                        }}
+                    end
+                end
+                UIManager:show(ButtonDialog:new{
+                    title = title,
+                    title_align = "center",
+                    buttons = buttons,
+                    width = math.floor(Screen:getWidth() * 0.7),
+                })
+            end
+        end
+    end
+    if not is_callable(mod[method]) then return nil end
+    return function()
+        return mod[method](mod)
+    end
+end
+
+-- ============================================================
+-- Plugin discovery (using built-in PluginScan)
+-- ============================================================
+
+local function getPluginsList()
+    local ok_loader, PluginLoader = pcall(require, "pluginloader")
+    if ok_loader and PluginLoader and type(PluginLoader.loadPlugins) == "function" then
+        pcall(PluginLoader.loadPlugins, PluginLoader)
+    end
+    
+    local plugins = PluginScan.scan()
+    logger.info("[QuickActions] Discovered " .. #plugins .. " plugins/patches")
+    return plugins
+end
+
+-- ============================================================
+-- Plugin execution (using PluginScan.resolve)
+-- ============================================================
+
+local function executePluginAction(plugin_key, plugin_method)
+    local resolve_func = PluginScan.resolve(plugin_key, plugin_method)
+    if not resolve_func then
+        UIManager:show(InfoMessage:new{
+            text = string.format(_("Unable to resolve plugin method: %s.%s"), plugin_key, plugin_method),
+            timeout = 2,
+        })
+        return
+    end
+    
+    pcall(resolve_func)
+end
+
+-- ============================================================
+-- UI font switching functionality (three font types, automatically replaces all corresponding keys)
+-- ============================================================
+
 local showFontPickerForUIKey
 local showUIFontSwitcher
 
--- Dialog tracking
 local _font_picker_dialog = nil
 local _font_main_dialog = nil
 
--- Get all available fonts
 local function getAvailableFonts()
     local fonts = FontList:getFontList()
     local result = {}
@@ -375,33 +775,28 @@ local function getAvailableFonts()
     return result
 end
 
--- UI font configuration list (3 font types)
 local UI_FONT_ITEMS = {
     { key = "regular", label = _("Regular font"), default = "NotoSans-Regular.ttf" },
     { key = "bold", label = _("Bold font"), default = "NotoSans-Bold.ttf" },
     { key = "mono", label = _("Monospace font"), default = "DroidSansMono.ttf" },
 }
 
--- Font type mapping to fontmap keys
 local FONT_TYPE_MAP = {
     regular = {"cfont", "ffont", "smallffont", "largeffont", "rifont", "pgfont", "hfont", "infofont", "smallinfofont", "x_smallinfofont", "xx_smallinfofont"},
     bold = {"tfont", "smalltfont", "x_smalltfont", "smallinfofontbold"},
     mono = {"scfont", "hpkfont", "infont", "smallinfont"},
 }
 
--- Get current font
 local function getCurrentUIFont(key)
     local Font = require("ui/font")
     return Font.fontmap[key] or ""
 end
 
--- Get user font override
 local function getUIFontOverride(key)
     local overrides = getTable("ui_font_overrides") or {}
     return overrides[key]
 end
 
--- Apply font changes
 local function applyUIFontChanges()
     local Font = require("ui/font")
     
@@ -440,7 +835,6 @@ local function applyUIFontChanges()
     
     Font.faces = {}
     
-    -- Refresh loaded Widget classes
     local ok, Button = pcall(require, "ui/widget/button")
     if ok and Button then
         Button.text_font_face = regular_font
@@ -465,7 +859,6 @@ local function applyUIFontChanges()
         InfoMessage.face = Font:getFace("infofont", orig_size)
     end
     
-    -- Notification
     local ok, Notification = pcall(require, "ui/widget/notification")
     if ok and Notification then
         local orig_size = Notification.face.orig_size or 18
@@ -502,7 +895,6 @@ local function applyUIFontChanges()
         end
     end
     
-    -- Refresh Menu and TouchMenu item rendering
     local ok, Menu = pcall(require, "ui/widget/menu")
     if ok and Menu and Menu.updateItems then
         local orig_update = Menu.updateItems
@@ -546,7 +938,6 @@ local function applyUIFontChanges()
     end
 end
 
--- Set UI font override
 local function setUIFontOverride(key, font_name)
     local overrides = getTable("ui_font_overrides") or {}
     if font_name then
@@ -559,11 +950,10 @@ local function setUIFontOverride(key, font_name)
     UIManager:setDirty("all", "full")
 end
 
--- Reset all UI fonts
 local function resetAllUIFonts()
     setTable("ui_font_overrides", {})
     UIManager:show(Notification:new{
-        text = _("All UI fonts have been reset, restart to take effect"),
+        text = _("All UI fonts reset, restart to take effect"),
         timeout = 2,
     })
     UIManager:show(ConfirmBox:new{
@@ -576,7 +966,6 @@ local function resetAllUIFonts()
     })
 end
 
--- Font picker
 function showFontPickerForUIKey(ui_key, ui_label, on_select, on_cancel)
     if _font_picker_dialog then
         UIManager:close(_font_picker_dialog)
@@ -603,8 +992,7 @@ function showFontPickerForUIKey(ui_key, ui_label, on_select, on_cancel)
         callback = function()
             if _font_picker_dialog then
                 UIManager:close(_font_picker_dialog)
-                _font_picker_dialog = nil
-            end
+                _font_picker_dialog = nil            end
             if on_cancel then on_cancel() end
         end,
     }})
@@ -651,7 +1039,6 @@ function showFontPickerForUIKey(ui_key, ui_label, on_select, on_cancel)
     UIManager:show(dialog)
 end
 
--- Show UI font switcher main interface
 function showUIFontSwitcher()
     if _font_main_dialog then
         UIManager:close(_font_main_dialog)
@@ -710,13 +1097,13 @@ function showUIFontSwitcher()
                         if new_font then
                             setUIFontOverride(item.key, new_font)
                             UIManager:show(Notification:new{
-                                text = string.format(_("%s has been set to %s"), item.label, new_font),
+                                text = string.format(_("%s set to %s"), item.label, new_font),
                                 timeout = 2,
                             })
                         else
                             setUIFontOverride(item.key, nil)
                             UIManager:show(Notification:new{
-                                text = string.format(_("%s has been reset to default"), item.label),
+                                text = string.format(_("%s reset to default"), item.label),
                                 timeout = 2,
                             })
                         end
@@ -741,7 +1128,6 @@ function showUIFontSwitcher()
     UIManager:show(dialog)
 end
 
--- Execute once on file load
 applyUIFontChanges()
 
 -- ============================================================
@@ -771,19 +1157,17 @@ local function isNerdIcon(icon_value)
 end
 
 -- ============================================================
--- Dynamic Nerd Font icon list generation (read from font file)
+-- Dynamically generate Nerd Font icon list (read from font file)
 -- ============================================================
 
 local ffi = require("ffi")
 
--- Declare FT_Get_Glyph_Name
 ffi.cdef[[
     FT_Error FT_Get_Glyph_Name(FT_Face face, FT_UInt glyph_index, FT_String *buffer, FT_UInt buffer_max);
 ]]
 
 local ft2 = ffi.loadlib("freetype", "6")
 
--- Check if a character code point is valid in Nerd Font
 local function isValidNerdChar(cp)
     if not cp or type(cp) ~= "number" then return false end
     
@@ -793,7 +1177,6 @@ local function isValidNerdChar(cp)
     return face.ftsize:hasGlyph(cp)
 end
 
--- Get Nerd Font glyph name
 local function getNerdGlyphName(cp)
     if not cp or type(cp) ~= "number" then return nil end
     
@@ -814,7 +1197,6 @@ local function getNerdGlyphName(cp)
     return ffi.string(buffer)
 end
 
--- Dynamically generate all valid Nerd Font icons (rescan each time)
 local function getNerdIcons()
     
     local icons = {}
@@ -822,31 +1204,19 @@ local function getNerdIcons()
     local name_cache = {}
     
     local ranges = {
-        -- Group 1: Most commonly used
-        {0x23FB, 0x23FE},  -- Power symbols
-
-        -- Group 2: Devicons (programming/development icons)
-        {0xE700, 0xE7FF},  -- Devicons
-
-        -- Group 3: Font Awesome
-        {0xF000, 0xF3FF},  -- Font Awesome first half
-        {0xF500, 0xF8FF},  -- Font Awesome second half
-
-        -- Group 4: Material Design
-        {0xE800, 0xE8FF},  -- Material second half
-        {0xE000, 0xE09F},  -- Material first half
-        {0xE100, 0xE2FF},  -- Material middle
-        {0xE400, 0xE6FF},  -- Material middle
-
-        -- Group 5: Octicons (GitHub icons)
-        {0xF400, 0xF4FF},  -- Octicons
-
-        -- Group 6: Domain-specific (less used, placed last)
-        {0xE300, 0xE3FF},  -- Weather icons
-        {0xE0A0, 0xE0FF},  -- Powerline (terminal decorators)
+        {0x23FB, 0x23FE},
+        {0xE700, 0xE7FF},
+        {0xF000, 0xF3FF},
+        {0xF500, 0xF8FF},
+        {0xE800, 0xE8FF},
+        {0xE000, 0xE09F},
+        {0xE100, 0xE2FF},
+        {0xE400, 0xE6FF},
+        {0xF400, 0xF4FF},
+        {0xE300, 0xE3FF},
+        {0xE0A0, 0xE0FF},
     }
     
-    -- First pass: get all valid code points and cache names
     for _, range in ipairs(ranges) do
         for cp = range[1], range[2] do
             if cp >= 0xD800 and cp <= 0xDFFF then goto continue end
@@ -865,7 +1235,6 @@ local function getNerdIcons()
         end
     end
     
-    -- Second pass: build icon list in range order
     for _, range in ipairs(ranges) do
         for cp = range[1], range[2] do
             if cp >= 0xD800 and cp <= 0xDFFF then goto continue2 end
@@ -908,21 +1277,18 @@ local function getIconFile(icon_name)
     if not icon_name then return nil end
     if isNerdIcon(icon_name) then return icon_name end
     
-    -- 1. If it's a full path, check directly
     if icon_name:sub(1,1) == "/" then
         if lfs.attributes(icon_name, "mode") == "file" then
             return icon_name
         end
     end
     
-    -- 2. Get koreader root directory
     local ok, DataStorage = pcall(require, "datastorage")
     local base_dir = ""
     if ok and DataStorage then
         base_dir = DataStorage:getDataDir()
     end
     
-    -- 3. Look up as relative path (relative to koreader/ directory)
     if base_dir ~= "" then
         local full_path = base_dir .. "/" .. icon_name
         full_path = full_path:gsub("/%.", ""):gsub("/+", "/")
@@ -931,10 +1297,9 @@ local function getIconFile(icon_name)
         end
     end
     
-    -- 4. Finally, strip path and search all icon directories (same as IconWidget)
     local filename = icon_name:match("([^/]+)$") or icon_name
     local dirs_to_check = {
-        getIconsDir(),                      -- koreader/icons/
+        getIconsDir(),
         "resources/icons/mdlight",
         "resources/icons",
         "resources",
@@ -1108,7 +1473,7 @@ function _InnerIconChooser:onMenuSelect(item)
             self.show_parent:onClose()
         end
         if self.onConfirm then
-            self.onConfirm(path)  -- Use path directly, no absolute path conversion
+            self.onConfirm(path)
         end
         return true
     end
@@ -1136,13 +1501,13 @@ function IconBrowser:init()
     local final_path = nil
     for _, path in ipairs(paths_to_check) do
         if lfs.attributes(path, "mode") == "directory" then
-            final_path = path  -- Use directly, no absolute path conversion
+            final_path = path
             logger.info("[QuickActions] Using icon directory:", final_path)
             break
         end
     end
     if not final_path then
-        logger.warn("[QuickActions] Cannot find any available directory")
+        logger.warn("[QuickActions] Unable to find any available directory")
         UIManager:show(InfoMessage:new{
             text = _("Cannot find icon directory, unable to open icon browser"),
             timeout = 3,
@@ -1215,7 +1580,7 @@ local function showNerdIconPreview(sentinel, on_select, on_cancel)
     local hex = sentinel:match("nerd:(.+)")
     UIManager:show(ConfirmBox:new{
         text = ("U+%s  %s"):format(hex, nerdIconChar(sentinel)) .. "\n\n" .. _("Use this Nerd Font icon?"),
-        ok_text = _("OK"),
+        ok_text = _("Confirm"),
         cancel_text = _("Back"),
         ok_callback = function() 
             if on_select then on_select(sentinel) end
@@ -1236,8 +1601,8 @@ local function showNerdIconInput(current_icon, on_select, saved_icon)
         dlg = InputDialog:new{
             title = _("Nerd Font Icon"),
             input = current_hex:upper(),
-            input_hint = _("Hexadecimal code point, e.g., E001"),
-            description = _("Enter the Unicode code point (hexadecimal) of the Nerd Fonts symbol.\nLeave empty and confirm to remove the Nerd Font icon."),
+            input_hint = _("Hexadecimal codepoint, e.g. E001"),
+            description = _("Enter the Unicode codepoint (hexadecimal) of the Nerd Fonts symbol.\nLeave empty and confirm to remove the Nerd Font icon."),
             buttons = {{
                 {
                     text = _("Back"),
@@ -1253,7 +1618,7 @@ local function showNerdIconInput(current_icon, on_select, saved_icon)
                     end,
                 },
                 {
-                    text = _("OK"),
+                    text = _("Confirm"),
                     is_enter_default = true,
                     callback = function()
                         local raw = dlg:getInputText()
@@ -1272,7 +1637,7 @@ local function showNerdIconInput(current_icon, on_select, saved_icon)
                                 end)
                             else
                                 UIManager:show(InfoMessage:new{
-                                    text = _("Invalid Unicode code point"),
+                                    text = _("Invalid Unicode codepoint"),
                                     timeout = 3,
                                 })
                             end
@@ -1292,11 +1657,10 @@ local function showNerdIconInput(current_icon, on_select, saved_icon)
 end
 
 -- ============================================================
--- Scan icon directory for SVG/PNG files
+-- Scan icon directories for SVG/PNG files
 -- ============================================================
 
 local function scanAllIconDirs(mode)
-    -- mode: nil scans all directories, "system" only scans resources/icons/mdlight/
     local all_files = {}
     local seen = {}
     
@@ -1305,10 +1669,10 @@ local function scanAllIconDirs(mode)
         dirs_to_scan = { "resources/icons/mdlight" }
     else
         dirs_to_scan = {
-            getIconsDir(),                      -- koreader/icons/
-            "resources/icons/mdlight",          -- KOReader default icons
-            "resources/icons",                  -- Fallback
-            "resources",                        -- Resources root
+            getIconsDir(),
+            "resources/icons/mdlight",
+            "resources/icons",
+            "resources",
         }
     end
     
@@ -1339,10 +1703,6 @@ local function scanAllIconDirs(mode)
     return all_files
 end
 
--- ============================================================
--- File icon cache (for normal mode, avoid repeated scans)
--- ============================================================
-
 local cached_file_icons = nil
 
 local function getFileIcons()
@@ -1356,10 +1716,6 @@ local function clearFileIconsCache()
     picker_cache = {} 
     cached_file_icons = nil
 end
-
--- ============================================================
--- System icon temporary override table (preview only, not saved to config)
--- ============================================================
 
 local system_temp_overrides = nil
 
@@ -1379,7 +1735,7 @@ local function resetSystemTempOverrides()
 end
 
 -- ============================================================
--- Icon picker (with grid filtering, auto-recalc layout on screen resize)
+-- Icon picker (with grid filtering, auto-recalculate layout on screen size change)
 -- ============================================================
 
 local picker_cache = {}
@@ -1398,16 +1754,13 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
     local cols, rows, per_page, h_gap, v_gap
     local cell_w, cell_h, icon_sz, font_size, cell_pad, grid_w, grid_h
 
-    -- Declare dialog and cur_page early
     local dialog = nil
     local cur_page = 1
 
-    -- Filtering related variables
     local filter_keyword = ""
     local filtered_icons_list = nil
     local search_dialog = nil
 
-    -- Get display list (filtered by keyword)
     local function getDisplayList()
         if filter_keyword == "" then
             return icons_list
@@ -1441,7 +1794,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         return filtered_icons_list
     end
 
-    -- Rebuild grid
     local function rebuildPicker()
         filtered_icons_list = nil
         local display_list = getDisplayList()
@@ -1532,7 +1884,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             search_dialog = nil
         end
 
-        -- Triggers on each keystroke
         local function onStrike()
             if search_dialog then
                 filter_keyword = search_dialog:getInputText() or ""
@@ -1545,8 +1896,8 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         search_dialog = InputDialog:new{
             title = _("Filter icons"),
             input = filter_keyword,
-            input_hint = _("Enter name or code point..."),
-            strike_callback = onStrike,  -- Triggers on each keystroke
+            input_hint = _("Enter name or codepoint..."),
+            strike_callback = onStrike,
             buttons = {
                 {
                     {
@@ -1579,7 +1930,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         temp_overrides = getSystemTempOverrides()
     end
 
-    -- Check if cache is valid (screen size unchanged)
     local cache_valid = false
     if use_cache and mode ~= "system" then
         local cached = picker_cache[cache_key]
@@ -1611,13 +1961,10 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         end
     end
 
-    -- Cache invalid or size changed, need to rebuild
     if not cache_valid then
-        -- If cache exists but size changed, reuse icons_list
         if use_cache and mode ~= "system" then
             icons_list = picker_cache[cache_key].icons_list
         else
-            -- Build icons_list
             icons_list = {}
 
             if (not filter or filter == "nerd") and mode ~= "system" then
@@ -1662,7 +2009,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             end
         end
 
-        -- Recalculate layout
         if sw > sh then
             cols = 9
             rows = 4
@@ -1691,7 +2037,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         frame_x = math.floor((sw - frame_w) / 2)
         frame_y = math.max(0, math.floor((sh - frame_h) / 2))
 
-        -- Rebuild page_widgets
         local display_list = getDisplayList()
         total_pages = math.max(1, math.ceil(#display_list / per_page))
         page_widgets = {}
@@ -1735,8 +2080,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
 
                         local border_color = Blitbuffer.COLOR_LIGHT_GRAY
                         local border_size = 1
-                        if mode == "system" and icon.is_overridden then
-                            border_color = Blitbuffer.COLOR_BLACK
+                        if mode == "system" and icon.is_overridden then                            border_color = Blitbuffer.COLOR_BLACK
                             border_size = 2
                         end
 
@@ -1764,7 +2108,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             page_widgets[p] = page_vg
         end
 
-        -- Cache full data
         if mode ~= "system" then
             picker_cache[cache_key] = {
                 icons_list = icons_list,
@@ -1796,7 +2139,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         end
     end
 
-    -- ===== Button row =====
     local btn_row
     if mode == "system" then
         local all_overrides = getTable("qa_icon_overrides")
@@ -1823,7 +2165,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                 setTable("qa_icon_overrides", {})
                 picker_cache = {}
                 UIManager:show(Notification:new{
-                    text = _("All icons have been reset, restart to take effect"),
+                    text = _("All icons reset, restart to take effect"),
                     timeout = 2,
                 })
                 UIManager:show(ConfirmBox:new{
@@ -1844,7 +2186,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             callback = function()
                 if replaced == 0 then
                     UIManager:show(InfoMessage:new{
-                        text = _("No replacements to apply"),
+                        text = _("No replaced icons to apply"),
                         timeout = 2,
                     })
                     return
@@ -1988,7 +2330,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                     local gx, gy = ges.pos.x, ges.pos.y
                     local btn_hit = 80
 
-                    -- Top-left back button
                     if gx >= frame_x + pad and gx < frame_x + pad + btn_hit
                             and gy >= frame_y + pad and gy < frame_y + pad + btn_hit then
                         UIManager:close(self)
@@ -2001,14 +2342,12 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         return true
                     end
 
-                    -- Top-right search button
                     if gx >= frame_x + frame_w - pad - btn_hit and gx < frame_x + frame_w - pad
                             and gy >= frame_y + pad and gy < frame_y + pad + btn_hit then
                         showSearchDialog()
                         return true
                     end
 
-                    -- Button row click
                     local btn_y = frame_y + pad + title_bar_h
                     if gy >= btn_y and gy < btn_y + button_bar_h then
                         if mode == "system" then
@@ -2035,7 +2374,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                 setTable("qa_icon_overrides", {})
                                 picker_cache = {}
                                 UIManager:show(Notification:new{
-                                    text = _("All icons have been reset, restart to take effect"),
+                                    text = _("All icons reset, restart to take effect"),
                                     timeout = 2,
                                 })
                                 UIManager:show(ConfirmBox:new{
@@ -2058,7 +2397,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                 end
                                 if replaced == 0 then
                                     UIManager:show(InfoMessage:new{
-                                        text = _("No replacements to apply"),
+                                        text = _("No replaced icons to apply"),
                                         timeout = 2,
                                     })
                                     return true
@@ -2097,7 +2436,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             local current_btn_width = math.floor(content_w / 4) - 5
                             local btn_index = 0
 
-                            -- Apply default
                             if gx >= btn_x_start and gx < btn_x_start + current_btn_width then
                                 UIManager:close(self)
                                 UIManager:setDirty("all", "full")
@@ -2106,7 +2444,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
-                            -- Refresh
                             local x_start = btn_x_start + (current_btn_width + 8) * btn_index
                             if gx >= x_start and gx < x_start + current_btn_width then
                                 clearFileIconsCache()
@@ -2118,7 +2455,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
-                            -- Toggle button (all/custom)
                             x_start = btn_x_start + (current_btn_width + 8) * btn_index
                             if gx >= x_start and gx < x_start + current_btn_width then
                                 UIManager:close(self)
@@ -2132,7 +2468,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             btn_index = btn_index + 1
 
-                            -- Browse files
                             if not filter or filter == "file" then
                                 x_start = btn_x_start + (current_btn_width + 8) * btn_index
                                 if gx >= x_start and gx < x_start + current_btn_width then
@@ -2152,7 +2487,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         end
                     end
 
-                    -- Bottom pagination
                     local bar_y = frame_y + pad + title_bar_h + button_bar_h + grid_h
                     if gy >= bar_y and gy < bar_y + footer_h then
                         local chev_w = 120
@@ -2169,10 +2503,9 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                             end
                             return true
                         else
-                            -- Middle area: pop up input dialog to jump to a specific page
                             local dlg
                             dlg = InputDialog:new{
-                                title = _("Go to page"),
+                                title = _("Jump to page"),
                                 input = tostring(cur_page),
                                 input_hint = string.format("1 - %d", total_pages),
                                 input_type = "number",
@@ -2185,7 +2518,7 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                                             end,
                                         },
                                         {
-                                            text = _("Go"),
+                                            text = _("Jump"),
                                             is_enter_default = true,
                                             callback = function()
                                                 local page = tonumber(dlg:getInputText())
@@ -2210,7 +2543,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
                         end
                     end
 
-                    -- Grid click
                     local grid_start_x = frame_x + pad + (content_w - grid_w) / 2
                     local grid_y = frame_y + pad + title_bar_h + button_bar_h
                     if gx >= grid_start_x and gx < grid_start_x + grid_w
@@ -2294,10 +2626,9 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         local content_x = frame_x + pad
         local content_y = frame_y + pad
 
-        -- Title
         local title_text
         if mode == "system" then
-            title_text = _("System Icon Preview")
+            title_text = _("System icon preview")
         elseif filter == "file" then
             title_text = _("Select icon file")
         else
@@ -2314,7 +2645,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         local title_w = title_tw:getSize().w
         title_tw:paintTo(bb, content_x + (content_w - title_w) / 2, content_y + 12)
 
-        -- Top-left back
         local back_tw = TextWidget:new{
             text = "↶",
             face = Font:getFace("cfont", 24),
@@ -2322,7 +2652,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         }
         back_tw:paintTo(bb, content_x, content_y + 5)
 
-        -- Top-right search icon (Nerd Font)
         local search_char = nerdIconChar("nerd:F002") or "?"
         local search_tw = TextWidget:new{
             text = search_char,
@@ -2331,11 +2660,9 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
         }
         search_tw:paintTo(bb, content_x + content_w - 35, content_y + 5)
 
-        -- Button row
         local btn_y = content_y + title_bar_h
         btn_row:paintTo(bb, content_x, btn_y)
 
-        -- Grid
         local grid_start_x = content_x + (content_w - grid_w) / 2
         local grid_start_y = content_y + title_bar_h + button_bar_h
         local display_list = getDisplayList()
@@ -2351,7 +2678,6 @@ local function showIconPicker(on_select, saved_icon, filter, mode, parent_mode)
             page_widgets[cur_page]:paintTo(bb, grid_start_x, grid_start_y)
         end
 
-        -- Pagination
         if total_pages > 1 then
             local bar_y = grid_start_y + grid_h + (footer_h - 20) / 2
             local left_arrow = TextWidget:new{
@@ -2477,7 +2803,7 @@ end
 local function _makeActionBar(menu)
     local buttons = {}
     table.insert(buttons, Button:new{
-        text = _("Finish recording and save as quick action"),
+        text = _("Save recording as quick action"),
         width = menu.item_width,
         text_font_bold = true,
         bordersize = Size.border.thin,
@@ -2632,7 +2958,7 @@ local function startPicking(menu, on_done, on_cancel, view)
         menu.bar:switchToTab(1)
     end
     UIManager:show(Notification:new{
-        text = _("Tap any menu item to record as quick action"),
+        text = _("Tap any menu item to record as a quick action"),
         timeout = 2,
     })
 end
@@ -2692,7 +3018,7 @@ local function replayPath(menu, path_record)
 end
 
 -- ============================================================
--- Action execution (kept as-is)
+-- Action execution
 -- ============================================================
 
 local ACTION_REGISTRY = {}
@@ -2702,48 +3028,6 @@ local _wifi_optimistic = nil
 local function getNetworkMgr()
     local ok, nm = pcall(require, "ui/network/manager")
     return ok and nm or nil
-end
-
-local function executePluginAction(plugin_key, plugin_method)
-    local FM = require("apps/filemanager/filemanager")
-    local fm = FM and FM.instance
-    local RUI = require("apps/reader/readerui")
-    local reader = RUI and RUI.instance
-    
-    local plugin_inst = nil
-    local source = "fm"
-    
-    -- 1. Check FM first
-    if fm and fm[plugin_key] then
-        plugin_inst = fm[plugin_key]
-        source = "fm"
-    end
-    
-    -- 2. If not in FM, check ReaderUI
-    if not plugin_inst and reader and reader[plugin_key] then
-        plugin_inst = reader[plugin_key]
-        source = "reader"
-    end
-    
-    if not plugin_inst then
-        UIManager:show(InfoMessage:new{
-            text = string.format(_("Plugin not available: %s"), plugin_key),
-            timeout = 2,
-        })
-        return
-    end
-    
-    -- 3. Support _qa_launch (callback extracted via addToMainMenu)
-    if plugin_method == "_qa_launch" and type(plugin_inst._qa_launch) == "function" then
-        pcall(plugin_inst._qa_launch, plugin_inst)
-    elseif type(plugin_inst[plugin_method]) == "function" then
-        pcall(plugin_inst[plugin_method], plugin_inst)
-    else
-        UIManager:show(InfoMessage:new{
-            text = string.format(_("Plugin method not available: %s.%s"), plugin_key, plugin_method),
-            timeout = 2,
-        })
-    end
 end
 
 local function executeDispatcherAction(action_id, action_value, ctx)
@@ -2843,15 +3127,15 @@ local function executeMenuAction(menu_path, ctx)
         end
     else
         local msg = (recorded_view == "reader") 
-            and _("This quick action can only be executed in the reader. Please open a book first.")
-            or _("This quick action can only be executed in the file manager.")
+            and _("This quick action can only be executed in the reader, please open a book first.")
+            or _("This quick action can only be executed in the file browser.")
         UIManager:show(InfoMessage:new{ text = msg, timeout = 3 })
         return
     end
 end
 
 -- ============================================================
--- Action retrieval and registration (kept as-is)
+-- Action getter and registration (kept as-is)
 -- ============================================================
 
 local function getAction(id)
@@ -2893,7 +3177,128 @@ local function getAction(id)
                 elseif cfg.action_type == "collection" and cfg.action_value then
                     executeCollectionAction(cfg.action_value)
                 elseif cfg.action_type == "plugin" and cfg.plugin_key then
-                    executePluginAction(cfg.plugin_key, cfg.plugin_method)
+    -- Submenu: execute via path indices
+    if cfg.plugin_method == "submenu" and cfg.plugin_path_indices then
+        local mod = live_plugin(cfg.plugin_key)
+        if mod and type(mod.addToMainMenu) == "function" then
+            local entry = probe_menu_entry(mod, cfg.plugin_key)
+            if entry then
+                local current_items = {}
+                local sub = entry.sub_item_table
+                if sub == nil and type(entry.sub_item_table_func) == "function" then
+                    local ok, res = pcall(entry.sub_item_table_func, TOUCHMENU_STUB)
+                    if ok then sub = res end
+                end
+                if type(sub) == "table" then
+                    current_items = sub
+                end
+                
+                local found_item = nil
+                for i, idx in ipairs(cfg.plugin_path_indices) do
+                    if current_items and current_items[idx] then
+                        found_item = current_items[idx]
+                        if i < #cfg.plugin_path_indices then
+                            local sub2 = found_item.sub_item_table
+                            if sub2 == nil and type(found_item.sub_item_table_func) == "function" then
+                                local ok2, res2 = pcall(found_item.sub_item_table_func, TOUCHMENU_STUB)
+                                if ok2 then sub2 = res2 end
+                            end
+                            current_items = sub2
+                        end
+                    else
+                        found_item = nil
+                        break
+                    end
+                end
+                
+                if found_item and type(found_item.callback) == "function" then
+                    pcall(found_item.callback)
+                    if ctx and ctx.touch_menu then
+                        ctx.touch_menu:onClose()
+                    end
+                else
+                    UIManager:show(InfoMessage:new{
+                        text = string.format(_("Cannot find plugin menu item (index: %s)"), table.concat(cfg.plugin_path_indices or {}, ", ")),
+                        timeout = 2,
+                    })
+                end
+                return
+            end
+        end
+    end
+    
+    -- Check if it's a patch (key starting with patch_)
+    if string.sub(cfg.plugin_key, 1, 6) == "patch_" then
+        local full_name = string.sub(cfg.plugin_key, 7)
+        local menu_title = full_name
+        local last_dot = string.find(full_name, " · ", 1, true)
+        if last_dot then
+            menu_title = string.sub(full_name, last_dot + 3)
+        end
+        -- Trim leading/trailing spaces
+        menu_title = menu_title:gsub("^%s+", ""):gsub("%s+$", "")
+        
+        logger.info("[QuickActions] Executing patch: menu_title=" .. menu_title)
+        
+        local FM = require("apps/filemanager/filemanager")
+        local fm = FM and FM.instance
+        local RUI = require("apps/reader/readerui")
+        local reader = RUI and RUI.instance
+        
+        local function findAndExecute(items)
+            if type(items) ~= "table" then return false end
+            for _, item in ipairs(items) do
+                if type(item) == "table" then
+                    local text = entry_text(item)
+                    if text == menu_title and type(item.callback) == "function" then
+                        logger.info("[QuickActions] Found match, executing callback")
+                        pcall(item.callback)
+                        if ctx and ctx.touch_menu then
+                            ctx.touch_menu:onClose()
+                        end
+                        return true
+                    end
+                    local sub = item.sub_item_table
+                    if sub == nil and type(item.sub_item_table_func) == "function" then
+                        local ok, res = pcall(item.sub_item_table_func, TOUCHMENU_STUB)
+                        if ok then sub = res end
+                    end
+                    if type(sub) == "table" then
+                        if findAndExecute(sub) then
+                            return true
+                        end
+                    end
+                end
+            end
+            return false
+        end
+        
+        local found = false
+        if fm and fm.menu and fm.menu.menu_items then
+            found = findAndExecute(fm.menu.menu_items)
+        end
+        if not found and reader and reader.menu and reader.menu.menu_items then
+            found = findAndExecute(reader.menu.menu_items)
+        end
+        if not found then
+            logger.info("[QuickActions] Cannot find patch: " .. menu_title)
+            UIManager:show(InfoMessage:new{
+                text = string.format(_("Cannot find patch menu item: %s"), menu_title),
+                timeout = 2,
+            })
+        end
+        return
+    end
+    
+    -- Normal plugin
+    local method = cfg.plugin_method
+    if type(method) ~= "string" then
+        method = PluginScan.SENTINEL
+    end
+    if method == "submenu" then
+        method = PluginScan.SENTINEL
+    end
+    executePluginAction(cfg.plugin_key, method)
                 elseif cfg.action_type == "dispatcher" and cfg.dispatcher_action then
                     executeDispatcherAction(cfg.dispatcher_action, cfg.dispatcher_value or true, ctx)
                 elseif cfg.action_type == "menu" and cfg.menu_path then
@@ -2949,7 +3354,6 @@ local function getIconForAction(id)
     end
 
 if id == "toggle_cloze_mode" then
-    -- Check if currently covered
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     if reader and reader.highlight then
@@ -2964,12 +3368,12 @@ if id == "toggle_cloze_mode" then
             end
         end
         if has_covered then
-            return "nerd:F070"  -- Covered (locked)
+            return "nerd:F070"
         else
-            return "nerd:F06E"  -- Not covered (unlocked)
+            return "nerd:F06E"
         end
     end
-    return "nerd:F06E"  -- Default unlocked
+    return "nerd:F06E"
 end
 
     local action = getAction(id)
@@ -2989,10 +3393,9 @@ local function registerAction(id, label, icon, is_in_place, view, execute_fn)
 end
 
 -- ============================================================
--- Register built-in actions (delete corresponding registration code to remove)
+-- Register built-in actions (delete the registration code for any you wish to remove)
 -- ============================================================
 
--- Built-in system quick actions
 registerAction("wifi", _("Wi-Fi"), "net-wifi.svg", true, "common", function(ctx)
     local NetworkMgr = getNetworkMgr()
     if not NetworkMgr then
@@ -3121,12 +3524,63 @@ registerAction("power", _("Power"), "nerd:F011", true, "common", function(ctx)
     UIManager:show(ButtonDialog:new{ width = math.floor(Screen:getWidth() * 0.42), buttons = buttons })
 end)
 
-registerAction("httpinspector", _("HTTP Server"), "nerd:E701", true, "common", function()
+registerAction("httpinspector", _("HTTP Server"), "nerd:E701", true, "common", function(ctx)
+    -- Get current UI
     local ui = require("apps/reader/readerui").instance
     if not ui then
         local FM = require("apps/filemanager/filemanager")
         ui = FM.instance
     end
+    
+    if not ui then
+        UIManager:show(Notification:new{
+            text = _("Unable to get UI instance"),
+            timeout = 2,
+        })
+        return
+    end
+    
+    -- Find the httpinspector menu item in the menu and execute its callback
+    local menu_items = ui.menu and ui.menu.menu_items
+    if menu_items and menu_items.httpremote then
+        local sub_items = menu_items.httpremote.sub_item_table
+        if sub_items and #sub_items > 0 then
+            local item = sub_items[1]
+            if item and type(item.callback) == "function" then
+                local touchmenu_instance = nil
+                if ui.menu and ui.menu.menu_container and ui.menu.menu_container[1] then
+                    touchmenu_instance = ui.menu.menu_container[1]
+                end
+                -- Execute callback (toggle state)
+                item.callback(touchmenu_instance)
+                
+                -- Close quick action panel
+                if ctx and ctx.touch_menu then
+                    ctx.touch_menu:onClose()
+                end
+                
+                -- Show notification
+                local is_running = false
+                if ui and ui.httpinspector then
+                    is_running = ui.httpinspector:isRunning()
+                end
+                if is_running then
+                    UIManager:show(Notification:new{
+                        text = _("HTTP server started"),
+                        timeout = 2,
+                    })
+                else
+                    UIManager:show(Notification:new{
+                        text = _("HTTP server stopped"),
+                        timeout = 2,
+                    })
+                end
+                return
+            end
+        end
+    end
+    
+    -- fallback logic...
     if ui and ui.httpinspector then
         if ui.httpinspector:isRunning() then
             ui.httpinspector:stop()
@@ -3143,14 +3597,14 @@ registerAction("httpinspector", _("HTTP Server"), "nerd:E701", true, "common", f
         end
     else
         UIManager:show(InfoMessage:new{
-            text = _("httpinspector plugin instance not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
+            text = _("httpinspector plugin instance not found"),
             timeout = 2,
         })
     end
 end)
 
--- Font list
-registerAction("fontlist", _("Font list"), "nerd:F031", false, "reader", function(ctx)
+
+registerAction("fontlist", "Font list", "nerd:F031", false, "reader", function(ctx)
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     local UIManager = require("ui/uimanager")
@@ -3162,7 +3616,7 @@ registerAction("fontlist", _("Font list"), "nerd:F031", false, "reader", functio
     
     if not reader then
         UIManager:show(InfoMessage:new{
-            text = _("Please open a book first"),
+            text = "Please open a book first",
             timeout = 2,
         })
         return
@@ -3181,7 +3635,6 @@ registerAction("fontlist", _("Font list"), "nerd:F031", false, "reader", functio
     
     local current_font = reader.view.font_face or G_reader_settings:readSetting("cre_font")
     
-    -- Create font_dialog variable first
     local font_dialog = nil
     
     for idx, face in ipairs(face_list) do
@@ -3197,7 +3650,6 @@ registerAction("fontlist", _("Font list"), "nerd:F031", false, "reader", functio
         table.insert(buttons, {{
             text = display_name .. (is_checked and "  ✓" or ""),
             callback = function()
-                -- Close font list dialog first
                 if font_dialog then
                     UIManager:close(font_dialog)
                     font_dialog = nil
@@ -3211,7 +3663,7 @@ registerAction("fontlist", _("Font list"), "nerd:F031", false, "reader", functio
                         reader.view.ui.doc_settings:saveSetting("font_face", face)
                     end
                     UIManager:show(Notification:new{
-                        text = string.format(_("Font set to: %s"), display_name),
+                        text = string.format("Font set to: %s", display_name),
                         timeout = 2,
                     })
                 end
@@ -3220,7 +3672,7 @@ registerAction("fontlist", _("Font list"), "nerd:F031", false, "reader", functio
     end
     
     font_dialog = ButtonDialog:new{
-        title = _("Select font"),
+        title = "Select font",
         title_align = "center",
         buttons = buttons,
         width = math.floor(Screen:getWidth() * 0.7),
@@ -3230,7 +3682,7 @@ registerAction("fontlist", _("Font list"), "nerd:F031", false, "reader", functio
     UIManager:show(font_dialog)
 end)
 
-registerAction("qa_settings", _("Quick Actions Settings"), "nerd:E73A", false, "common", function(ctx)
+registerAction("qa_settings", _("Quick Action Settings"), "nerd:E73A", false, "common", function(ctx)
     showSettingsMenu()
 end)
 
@@ -3250,7 +3702,6 @@ registerAction("qa_new", _("New Quick Action"), "nerd:F067", false, "common", fu
 end)
 
 
--- UI Font Switcher
 registerAction("ui_font_switch", _("Switch UI Font"), "nerd:F30B", true, "common", function(ctx)
     showUIFontSwitcher()
 end)
@@ -3271,10 +3722,6 @@ registerAction("qa_add_button", _("Add Button"), "nerd:F055", false, "common", f
     showAddButtonMenu(touch_menu)
 end)
 
-
--- Built-in external plugin and patch quick actions
-
--- Patch: 2-fm-cover.lua (cover visual settings)
 registerAction("fmcoversettings", _("Cover Visual Settings"), "nerd:E8C8", false, "filemanager", function()
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
@@ -3290,15 +3737,12 @@ registerAction("fmcoversettings", _("Cover Visual Settings"), "nerd:E8C8", false
     end
 end)
 
--- Patch: 2-reader-clozemode.lua (cloze mode)
 registerAction("toggle_cloze_mode", _("Cloze Mode"), "nerd:F040", false, "reader", function(ctx)
     local RUI = require("apps/reader/readerui")
     local reader = RUI and RUI.instance
     
     if reader then
-        -- Broadcast event for clozemode patch to handle
         UIManager:broadcastEvent(Event:new("Toggleclozemode"))
-        -- Refresh panel to update icon
         if ctx and ctx.touch_menu then
             ctx.touch_menu:updateItems()
         end
@@ -3310,12 +3754,10 @@ registerAction("toggle_cloze_mode", _("Cloze Mode"), "nerd:F040", false, "reader
     end
 end)
 
--- Patch: 2-reading-insights-dashboard-v2 (statistics)
 registerAction("reading_insights", _("Reading Insights"), "nerd:F073", false, "common", function(ctx)
     UIManager:broadcastEvent(Event:new("ShowReadingInsightsPopup"))
 end)
 
--- Plugin: filebrowserplus.koplugin
 registerAction("filebrowserplus", _("FilebrowserPlus"), "nerd:F029", true, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
@@ -3335,13 +3777,12 @@ registerAction("filebrowserplus", _("FilebrowserPlus"), "nerd:F029", true, "comm
         end
     else
         UIManager:show(InfoMessage:new{
-            text = _("filebrowserplus plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
+            text = _("filebrowserplus plugin instance or method not found, please check if the plugin is installed or modify the action registration to adapt to the updated plugin"),
             timeout = 2,
         })
     end
 end)
 
--- Plugin: zlibrary.koplugin
 registerAction("zlibrary_search", _("ZLibrary Search"), "nerd:E76F", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
@@ -3357,14 +3798,13 @@ registerAction("zlibrary_search", _("ZLibrary Search"), "nerd:E76F", false, "com
         plugin:onZlibrarySearch()
     else
         UIManager:show(InfoMessage:new{
-            text = _("zlibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
+            text = _("zlibrary plugin instance or method not found, please check if the plugin is installed or modify the action registration to adapt to the updated plugin"),
             timeout = 2,
         })
     end
 end)
 
--- Plugin: cloudlibrary.koplugin
-registerAction("cloudlibrary_autosync", _("CloudLibrary - Auto Sync"), "nerd:E33B", false, "common", function()
+registerAction("cloudlibrary_autosync", _("CloudLibrary - Smart Sync"), "nerd:E33B", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
     local RUI = require("apps/reader/readerui")
@@ -3379,13 +3819,12 @@ registerAction("cloudlibrary_autosync", _("CloudLibrary - Auto Sync"), "nerd:E33
         plugin:toggleAutoSyncQuick()
     else
         UIManager:show(InfoMessage:new{
-            text = _("CloudLibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
+            text = _("cloudLibrary plugin instance or method not found, please check if the plugin is installed or modify the action registration to adapt to the updated plugin"),
             timeout = 2,
         })
     end
 end)
 
--- Plugin: cloudlibrary.koplugin
 registerAction("cloudlibrary_batch_download_books", _("CloudLibrary - Batch Download/Delete"), "nerd:F409", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
@@ -3401,13 +3840,12 @@ registerAction("cloudlibrary_batch_download_books", _("CloudLibrary - Batch Down
         plugin:batchDownloadBooks()
     else
         UIManager:show(InfoMessage:new{
-            text = _("CloudLibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
+            text = _("cloudLibrary plugin instance or method not found, please check if the plugin is installed or modify the action registration to adapt to the updated plugin"),
             timeout = 2,
         })
     end
 end)
 
--- Plugin: cloudlibrary.koplugin
 registerAction("cloudlibrary_settings", _("CloudLibrary - Settings"), "nerd:E33D", false, "common", function()
     local FM = require("apps/filemanager/filemanager")
     local fm = FM and FM.instance
@@ -3427,13 +3865,12 @@ registerAction("cloudlibrary_settings", _("CloudLibrary - Settings"), "nerd:E33D
         end
     else
         UIManager:show(InfoMessage:new{
-            text = _("CloudLibrary plugin instance or method not found. Please check if the plugin is installed or modify the action registration method to adapt to the updated plugin."),
+            text = _("cloudLibrary plugin instance or method not found, please check if the plugin is installed or modify the action registration to adapt to the updated plugin"),
             timeout = 2,
         })
     end
 end)
 
--- Plugin: annotationsviewer.koplugin
 registerAction("annotations_viewer", _("Annotations Viewer"), "nerd:F040", false, "common", function()
     local UIManager = require("ui/uimanager")
     local Event = require("ui/event")
@@ -3443,7 +3880,6 @@ registerAction("annotations_viewer", _("Annotations Viewer"), "nerd:F040", false
     local reader = RUI and RUI.instance
     local fm = FM and FM.instance
     
-    -- Check if plugin is installed
     local has_plugin = false
     if reader and reader.annotationsviewer then
         has_plugin = true
@@ -3453,13 +3889,12 @@ registerAction("annotations_viewer", _("Annotations Viewer"), "nerd:F040", false
     
     if not has_plugin then
         UIManager:show(InfoMessage:new{
-            text = _("annotationsviewer plugin is not installed"),
+            text = _("annotationsviewer plugin not installed"),
             timeout = 2,
         })
         return
     end
     
-    -- Execute action
     if reader then
         UIManager:broadcastEvent(Event:new("ShowCurrentBookAnnotations"))
     else
@@ -3468,7 +3903,7 @@ registerAction("annotations_viewer", _("Annotations Viewer"), "nerd:F040", false
 end)
 
 -- ============================================================
--- View-specific configuration (view management)
+-- UI-specific configuration (view management)
 -- ============================================================
 
 local function isMenuAction(action_id)
@@ -3736,174 +4171,8 @@ local function getCollectionsList()
 end
 
 -- ============================================================
--- Plugin discovery helper functions (defined before getPluginsList)
+-- Get system action list
 -- ============================================================
-
--- Detect plugin call method
-local function _detectPluginMethod(val, key)
-    -- Try common method names
-    for _, pfx in ipairs({"onShow","show","open","launch","onOpen"}) do
-        if type(val[pfx]) == "function" then return pfx end
-    end
-    
-    -- Try on + capitalized first letter
-    local cap = "on" .. key:sub(1,1):upper() .. key:sub(2)
-    if type(val[cap]) == "function" then return cap end
-    
-    -- Extract callback via addToMainMenu
-    if type(val.addToMainMenu) == "function" then
-        local probe = {}
-        local ok = pcall(function() val:addToMainMenu(probe) end)
-        if ok then
-            local entry = probe[key] or probe[val.name]
-            if entry and type(entry.callback) == "function" then
-                val._qa_launch = function() entry.callback() end
-                return "_qa_launch"
-            end
-        end
-    end
-    
-    return nil
-end
-
--- Get plugin display name
-local function _getPluginDisplayName(val, key)
-    local raw = (val.name or key):gsub("^filemanager", ""):gsub("^reader", "")
-    local display = raw:sub(1,1):upper() .. raw:sub(2)
-    if display == "" or display == key then
-        display = key:gsub("^filemanager", ""):gsub("^reader", "")
-        display = display:sub(1,1):upper() .. display:sub(2)
-    end
-    
-    -- Try to get better display name from addToMainMenu
-    if type(val.addToMainMenu) == "function" then
-        local probe = {}
-        local ok = pcall(function() val:addToMainMenu(probe) end)
-        if ok then
-            local entry = probe[key] or probe[val.name]
-            if entry and type(entry.text) == "string" and entry.text ~= "" then
-                display = entry.text
-            end
-        end
-    end
-    
-    return display
-end
-
--- ============================================================
--- Plugin list (defined after helper functions)
--- ============================================================
-
-local function getPluginsList()
-    local FM = require("apps/filemanager/filemanager")
-    local fm = FM and FM.instance
-    local RUI = require("apps/reader/readerui")
-    local reader = RUI and RUI.instance
-    
-    local results = {}
-    local seen = {}
-    
-    -- 1. Predefined known plugins (fallback)
-    local known = {
-        -- FM plugins
-        { key = "history", method = "onShowHist", title = _("History"), source = "fm" },
-        { key = "collections", method = "onShowCollList", title = _("Collections List"), source = "fm" },
-        { key = "filesearcher", method = "onShowFileSearch", title = _("File Search"), source = "fm" },
-        { key = "dictionary", method = "onShowDictionaryLookup", title = _("Dictionary"), source = "fm" },
-        { key = "folder_shortcuts", method = "onShowFolderShortcutsDialog", title = _("Folder Shortcuts"), source = "fm" },
-        { key = "bookinfo", method = "onShowBookInfo", title = _("Book Info"), source = "fm" },
-        { key = "wikipedia", method = "onShowWikipediaLookup", title = _("Wikipedia Lookup"), source = "fm" },
-        -- ReaderUI plugins
-        { key = "bookmark", method = "onShowBookmarks", title = _("Bookmarks"), source = "reader" },
-        { key = "highlight", method = "onShowHighlights", title = _("Highlights"), source = "reader" },
-        { key = "search", method = "onShowSearch", title = _("Search"), source = "reader" },
-    }
-    
-    for _, entry in ipairs(known) do
-        local target = (entry.source == "reader") and reader or fm
-        if target then
-            local mod = target[entry.key]
-            if mod and type(mod[entry.method]) == "function" then
-                results[#results + 1] = {
-                    key = entry.key,
-                    method = entry.method,
-                    title = entry.title,
-                    source = entry.source,
-                }
-                seen[entry.key] = true
-            end
-        end
-    end
-    
-    -- 2. Dynamic scan of FM plugins
-    if fm then
-        local native_keys = {
-            screenshot=true, menu=true, history=true, bookinfo=true, collections=true,
-            filesearcher=true, folder_shortcuts=true, languagesupport=true,
-            dictionary=true, wikipedia=true, devicestatus=true, devicelistener=true,
-            networklistener=true,
-        }
-        local fm_val_to_key = {}
-        for k, v in pairs(fm) do
-            if type(k) == "string" and type(v) == "table" then fm_val_to_key[v] = k end
-        end
-        
-        for i = 1, #fm do
-            local val = fm[i]
-            if type(val) ~= "table" or type(val.name) ~= "string" then goto continue_fm end
-            
-            local fm_key = fm_val_to_key[val]
-            if not fm_key or native_keys[fm_key] or seen[fm_key] then goto continue_fm end
-            
-            seen[fm_key] = true
-            local method = _detectPluginMethod(val, fm_key)
-            if method then
-                results[#results + 1] = {
-                    key = fm_key,
-                    method = method,
-                    title = _getPluginDisplayName(val, fm_key),
-                    source = "fm",
-                }
-            end
-            ::continue_fm::
-        end
-    end
-    
-    -- 3. Dynamic scan of ReaderUI plugins
-    if reader then
-        local reader_native_keys = {
-            menu=true, bookmark=true, highlight=true, search=true,
-            progress=true, dictionary=true, wikipedia=true,
-        }
-        local reader_val_to_key = {}
-        for k, v in pairs(reader) do
-            if type(k) == "string" and type(v) == "table" then reader_val_to_key[v] = k end
-        end
-        
-        for i = 1, #reader do
-            local val = reader[i]
-            if type(val) ~= "table" or type(val.name) ~= "string" then goto continue_reader end
-            
-            local r_key = reader_val_to_key[val]
-            if not r_key or reader_native_keys[r_key] or seen[r_key] then goto continue_reader end
-            
-            seen[r_key] = true
-            local method = _detectPluginMethod(val, r_key)
-            if method then
-                results[#results + 1] = {
-                    key = r_key,
-                    method = method,
-                    title = _getPluginDisplayName(val, r_key),
-                    source = "reader",
-                }
-            end
-            ::continue_reader::
-        end
-    end
-    
-    table.sort(results, function(a, b) return a.title:lower() < b.title:lower() end)
-    return results
-end
 
 local function getDispatcherActions()
     local ok, DispatcherMod = pcall(require, "dispatcher")
@@ -3929,11 +4198,11 @@ local function getDispatcherActions()
     local sections = {
         { key = "general",     title = _("General") },
         { key = "device",      title = _("Device") },
-        { key = "screen",      title = _("Screen & Lighting") },
-        { key = "filemanager", title = _("File Manager") },
+        { key = "screen",      title = _("Screen & Light") },
+        { key = "filemanager", title = _("File Browser") },
         { key = "reader",      title = _("Reader") },
-        { key = "rolling",     title = _("Re-flowable documents (epub, fb2, txt…)") },
-        { key = "paging",      title = _("Fixed-layout documents (pdf, djvu, images…)") },
+        { key = "rolling",     title = _("Re-flowable (epub, fb2, txt…)") },
+        { key = "paging",      title = _("Fixed layout (pdf, djvu, images…)") },
     }
     local sections_map = {}
     for _, sec in ipairs(sections) do
@@ -3968,7 +4237,7 @@ local function getDispatcherActions()
 end
 
 -- ============================================================
--- Delete and removal functions
+-- Delete and remove functions
 -- ============================================================
 
 local function deleteCustomQA(qa_id)
@@ -3999,7 +4268,7 @@ function removeFromPanel(action_id, touch_menu)
     end
     if not found then
         UIManager:show(Notification:new{
-            text = _("This button is not in the quick actions tab"),
+            text = _("This button is not in the quick action tab"),
             timeout = 2,
         })
         return false
@@ -4012,7 +4281,7 @@ function removeFromPanel(action_id, touch_menu)
 end
 
 -- ============================================================
--- Generic menu display framework
+-- Common menu display framework
 -- ============================================================
 
 local function showMenu(items, title, parent_stack, touch_menu, root_items)
@@ -4024,7 +4293,7 @@ local function showMenu(items, title, parent_stack, touch_menu, root_items)
                     text = "◂◂ " .. _("Back to root menu"),
                     callback = function()
                         closeSettingsDialog()
-                        showMenu(root_items, _("Quick Actions Settings"), nil, touch_menu, root_items)
+                        showMenu(root_items, _("Quick Action Settings"), nil, touch_menu, root_items)
                     end
                 }
             })
@@ -4104,7 +4373,7 @@ local function showMenu(items, title, parent_stack, touch_menu, root_items)
         end
     end
     local dialog = ButtonDialog:new{
-        title = title or _("Quick Actions Settings"),
+        title = title or _("Quick Action Settings"),
         title_align = "center",
         buttons = buttons,
         width = math.floor(Screen:getWidth() * 0.7),
@@ -4172,7 +4441,6 @@ local function showEditActionDialog(action_id, on_done)
 
         local pos, total = getCurrentPosition()
 
-        -- Build last row
         local last_row = {
             { text = _("Cancel"), callback = function()
                 UIManager:close(active_dialog)
@@ -4180,7 +4448,6 @@ local function showEditActionDialog(action_id, on_done)
             end },
         }
 
-        -- Remove
         table.insert(last_row, { text = _("Remove"), callback = function()
             if active_dialog then
                 local inputs = active_dialog:getFields()
@@ -4194,7 +4461,6 @@ local function showEditActionDialog(action_id, on_done)
             if on_done then on_done() end
         end })
 
-        -- Move left
         if pos then
             table.insert(last_row, { text = "◀", enabled = (pos > 1), callback = function()
                 if active_dialog then
@@ -4221,7 +4487,6 @@ local function showEditActionDialog(action_id, on_done)
             end })
         end
 
-        -- Position button
         if pos then
             table.insert(last_row, { text = pos .. "/" .. total, callback = function()
                 UIManager:close(active_dialog)
@@ -4232,7 +4497,7 @@ local function showEditActionDialog(action_id, on_done)
                     sort_items[#sort_items + 1] = { text = getLabelForAction(id), orig_item = id }
                 end
                 local sort_dialog = SortWidget:new{
-                    title = _("Arrange Buttons"),
+                    title = _("Reorder buttons"),
                     item_table = sort_items,
                     covers_fullscreen = true,
                     callback = function()
@@ -4248,7 +4513,6 @@ local function showEditActionDialog(action_id, on_done)
             end })
         end
 
-        -- Move right
         if pos then
             table.insert(last_row, { text = "▶", enabled = (pos < total), callback = function()
                 if active_dialog then
@@ -4340,7 +4604,7 @@ local function showEditActionDialog(action_id, on_done)
                     end,
                 }})
                 view_dialog = ButtonDialog:new{
-                    title = _("Select context"),
+                    title = _("Select Context"),
                     title_align = "center",
                     buttons = view_buttons,
                 }
@@ -4507,7 +4771,7 @@ function showAddButtonMenu(touch_menu, on_back)
     local show_slider_val = showSliderValue()
     table.insert(buttons, {
         {
-            text = (show_slider_val and "✓ " or "  ") .. _("Show slider values"),
+            text = (show_slider_val and "✓ " or "  ") .. _("Show slider value"),
             callback = function()
                 setBool("qa_slider_show_value", not showSliderValue())
                 if touch_menu then touch_menu:updateItems() end
@@ -4517,7 +4781,6 @@ function showAddButtonMenu(touch_menu, on_back)
         }
     })
     
-    -- Select all / deselect all button
     local function getAllChecked()
         for _, action in ipairs(available) do
             if not slot_set[action.id] then
@@ -4537,7 +4800,6 @@ function showAddButtonMenu(touch_menu, on_back)
                 local new_slots = {}
                 
                 if is_all_checked then
-                    -- Deselect all: keep only buttons not in available (e.g., frontlight, warmth)
                     for _, id in ipairs(current_slots) do
                         local is_available = false
                         for _, action in ipairs(available) do
@@ -4551,7 +4813,6 @@ function showAddButtonMenu(touch_menu, on_back)
                         end
                     end
                 else
-                    -- Select all: keep existing, add all unselected
                     for _, id in ipairs(current_slots) do
                         table.insert(new_slots, id)
                     end
@@ -4577,7 +4838,7 @@ function showAddButtonMenu(touch_menu, on_back)
             end,
         }
     })
-    table.insert(buttons, {})  -- Separator
+    table.insert(buttons, {})
     
     for i = 1, #available do
         local action = available[i]
@@ -4685,7 +4946,7 @@ function showInterfaceFilterMenu(touch_menu)
                 if not has_unlocked then
                     all_checked = true
                 end
-                return all_checked and "☑ " .. _("Deselect all") or "☐ " .. _("Make all dedicated")
+                return all_checked and "☑ " .. _("Deselect all") or "☐ " .. _("Make all context-specific")
             end,
             enabled = function()
                 local current_actions = getAllActionsForFilter()
@@ -4804,11 +5065,11 @@ function showInterfaceFilterMenu(touch_menu)
                 end,
             },
             {
-                text = _("Reset to default dedicated"),
+                text = _("Reset to default context"),
                 close_on_click = true,
                 callback = function()
                     local confirm = ConfirmBox:new{
-                        text = _("Reset all dedicated settings to default?"),
+                        text = _("Reset all context-specific settings to default values?"),
                         ok_text = _("Reset"),
                         cancel_text = _("Cancel"),
                         ok_callback = function()
@@ -4826,7 +5087,7 @@ function showInterfaceFilterMenu(touch_menu)
                             setTable("custom", custom)
                             refreshQuickPanel(touch_menu)
                             UIManager:show(Notification:new{
-                                text = _("Reset to default dedicated settings"),
+                                text = _("Reset to default context"),
                                 timeout = 2,
                             })
                         end,
@@ -4840,10 +5101,9 @@ function showInterfaceFilterMenu(touch_menu)
 end
 
 -- ============================================================
--- Dispatcher helper functions (extracted to reduce upvalues)
+-- Dispatcher related helper functions (extracted to reduce upvalues)
 -- ============================================================
 
--- Close dispatcher dialogs
 local function closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
     if disp_picker then
         UIManager:close(disp_picker)
@@ -4860,10 +5120,8 @@ local function closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
     return disp_picker, sub_dialog, choice_dialog
 end
 
--- Build configurable type submenu
 local function buildConfigurableSubItems(item, def, touch_menu, buildSaveDialog, openDispatcherPickerFn, closeSettingsDialogFn, showSettingsMenuFn, getCurrentActionType, getCurrentActionVal1, getCurrentActionVal2, getCurrentActionTitle, getCurrentView, setCurrentActionType, setCurrentActionVal1, setCurrentActionVal2, setCurrentActionTitle, setCurrentView)
     return function()
-        -- Close parent menu
         if sub_dialog then
             UIManager:close(sub_dialog)
             sub_dialog = nil
@@ -4898,7 +5156,7 @@ local function buildConfigurableSubItems(item, def, touch_menu, buildSaveDialog,
         }})
 
         table.insert(sub_items, {{
-            text = "◂◂ " .. _("Back to edit dialog"),
+            text = "◂◂ " .. _("Back to editor"),
             callback = function()
                 if sub_dialog then
                     UIManager:close(sub_dialog)
@@ -4906,7 +5164,8 @@ local function buildConfigurableSubItems(item, def, touch_menu, buildSaveDialog,
                 end
                 if disp_picker then
                     UIManager:close(disp_picker)
-                    disp_picker = nil                end
+                    disp_picker = nil
+                end
                 buildSaveDialog(false)
             end
         }})
@@ -5030,7 +5289,6 @@ function showCustomQADialog(qa_id, on_done)
     local buildSaveDialog
     local openActionPicker
 
-    -- Modified: menu type does not save view
     local function commitQA(final_label, path, collection, icon, plugin_key, plugin_method, dispatcher_action, dispatcher_value, menu_path, user_view)
         local list = getSetting("custom_list")
         if type(list) ~= "table" then list = {} end
@@ -5086,9 +5344,18 @@ function showCustomQADialog(qa_id, on_done)
             cfg_table.action_value = path
         elseif collection and collection ~= "" then
             cfg_table.action_value = collection
-        elseif plugin_key and plugin_key ~= "" then
-            cfg_table.plugin_key = plugin_key
+elseif plugin_key and plugin_key ~= "" then
+    cfg_table.plugin_key = plugin_key
+    if dispatcher_value and type(dispatcher_value) == "table" and dispatcher_value.type == "submenu" then
+        cfg_table.plugin_method = "submenu"
+        cfg_table.plugin_path_indices = dispatcher_value.path_indices
+    else
+        if type(plugin_method) == "string" then
             cfg_table.plugin_method = plugin_method
+        else
+            cfg_table.plugin_method = PluginScan.SENTINEL
+        end
+    end
         elseif dispatcher_action and dispatcher_action ~= "" then
             cfg_table.dispatcher_action = dispatcher_action
             cfg_table.dispatcher_value = dispatcher_value
@@ -5174,7 +5441,7 @@ function showCustomQADialog(qa_id, on_done)
         end
         
         choice_dialog = ButtonDialog:new{
-            title = _("Action Type"),
+            title = _("Action type"),
             title_align = "center",
             buttons = {
                 {{ text = _("Folder"), callback = function()
@@ -5218,46 +5485,258 @@ function showCustomQADialog(qa_id, on_done)
                         if coll_picker then UIManager:close(coll_picker); coll_picker = nil end
                         openActionPicker()
                     end }}
-                    coll_picker = ButtonDialog:new{ title = _("Select Collection"), title_align = "center", buttons = coll_buttons }
+                    coll_picker = ButtonDialog:new{ title = _("Select collection"), title_align = "center", buttons = coll_buttons }
                     UIManager:show(coll_picker)
                 end }},
-                {{ text = _("Plugin"), callback = function()
-                    UIManager:close(choice_dialog)
-                    choice_dialog = nil
-                    
-                    local plugins = getPluginsList()
-                    if #plugins == 0 then
-                        UIManager:show(InfoMessage:new{ text = _("No plugins available"), timeout = 3 })
-                        cancelActionPicker()
-                        return
+{{ text = _("Plugin or Patch"), callback = function()
+    UIManager:close(choice_dialog)
+    choice_dialog = nil
+    
+    local plugins = getPluginsList()
+    if #plugins == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No plugins or patches available"), timeout = 3 })
+        cancelActionPicker()
+        return
+    end
+    
+    -- Forward declaration (declare first, define later)
+    local showPluginSubMenu
+    local showPluginList
+    
+    -- Define showPluginSubMenu (recursively display submenu, passing index path)
+    function showPluginSubMenu(plugin_key, plugin_title, items, level, parent_indices)
+        parent_indices = parent_indices or {}
+        local buttons = {}
+        
+        if level > 0 then
+            table.insert(buttons, {{
+                text = "◂ " .. _("Back"),
+                callback = function()
+                    if plugin_picker then
+                        UIManager:close(plugin_picker)
+                        plugin_picker = nil
                     end
+                    showPluginList()
+                end
+            }})
+            table.insert(buttons, {})
+        end
+        
+        for idx, item in ipairs(items or {}) do
+            if type(item) == "table" then
+                local text = entry_text(item) or _("Unnamed")
+                
+                local sub = item.sub_item_table
+                if sub == nil and type(item.sub_item_table_func) == "function" then
+                    local ok, res = pcall(item.sub_item_table_func, TOUCHMENU_STUB)
+                    if ok then sub = res end
+                end
+                
+                if type(sub) == "table" and #sub > 0 then
+                    local new_indices = {}
+                    for _, p in ipairs(parent_indices) do
+                        table.insert(new_indices, p)
+                    end
+                    table.insert(new_indices, idx)
                     
-                    table.sort(plugins, function(a, b) return a.title:lower() < b.title:lower() end)
-                    local plugin_buttons = {}
-                    for _, p in ipairs(plugins) do
-                        local _p = p
-                        plugin_buttons[#plugin_buttons + 1] = {{ text = p.title, callback = function()
-                            if plugin_picker then UIManager:close(plugin_picker); plugin_picker = nil end
-                            if choice_dialog then UIManager:close(choice_dialog); choice_dialog = nil end
+                    table.insert(buttons, {{
+                        text = text .. " ▸",
+                        callback = function()
+                            if plugin_picker then
+                                UIManager:close(plugin_picker)
+                                plugin_picker = nil
+                            end
+                            showPluginSubMenu(plugin_key, plugin_title .. " → " .. text, sub, level + 1, new_indices)
+                        end,
+                    }})
+                elseif type(item.callback) == "function" then
+                    local full_indices = {}
+                    for _, p in ipairs(parent_indices) do
+                        table.insert(full_indices, p)
+                    end
+                    table.insert(full_indices, idx)
+                    
+                    table.insert(buttons, {{
+                        text = text,
+                        callback = function()
+                            if plugin_picker then
+                                UIManager:close(plugin_picker)
+                                plugin_picker = nil
+                            end
+                            if choice_dialog then
+                                UIManager:close(choice_dialog)
+                                choice_dialog = nil
+                            end
                             current_action_type = "plugin"
-                            current_action_val1 = _p.key
-                            current_action_val2 = _p.method
-                            current_action_title = _p.title
+                            current_action_val1 = plugin_key
+                            current_action_val2 = {
+                                type = "submenu",
+                                path_indices = full_indices,
+                            }
+                            current_action_title = text
                             current_view = "common"
                             buildSaveDialog(true)
-                        end }}
+                        end,
+                    }})
+                end
+            end
+        end
+        
+        if #buttons == (level > 0 and 2 or 0) then
+            table.insert(buttons, {{
+                text = _("(No available actions)"),
+                enabled = false,
+            }})
+        end
+        
+        plugin_picker = ButtonDialog:new{
+            title = level == 0 and _("Select plugin or patch") or plugin_title,
+            title_align = "center",
+            buttons = buttons,
+            width = math.floor(Screen:getWidth() * 0.7),
+            max_height = math.floor(Screen:getHeight() * 0.7),
+        }
+        UIManager:show(plugin_picker)
+    end
+    
+    -- Define showPluginList
+    function showPluginList()
+        local buttons = {}
+        
+        -- First separate plugins and patches
+        local plugin_buttons = {}
+        local patch_buttons = {}
+        
+        for _, p in ipairs(plugins) do
+            if p.is_patch then
+                -- Patch: add directly
+                table.insert(patch_buttons, {{
+                    text = p.display_title or p.title,
+                    callback = function()
+                        if plugin_picker then
+                            UIManager:close(plugin_picker)
+                            plugin_picker = nil
+                        end
+                        if choice_dialog then
+                            UIManager:close(choice_dialog)
+                            choice_dialog = nil
+                        end
+                        current_action_type = "plugin"
+                        current_action_val1 = p.key
+                        current_action_val2 = PluginScan.SENTINEL
+                        current_action_title = p.title
+                        current_view = "common"
+                        buildSaveDialog(true)
+                    end,
+                }})
+            else
+                -- Plugin: original logic
+                local mod = live_plugin(p.key)
+                if mod and type(mod.addToMainMenu) == "function" then
+                    local entry = probe_menu_entry(mod, p.key)
+                    if entry then
+                        local sub = entry.sub_item_table
+                        if sub == nil and type(entry.sub_item_table_func) == "function" then
+                            local ok, res = pcall(entry.sub_item_table_func, TOUCHMENU_STUB)
+                            if ok then sub = res end
+                        end
+                        
+                        if type(sub) == "table" and #sub > 0 then
+                            table.insert(plugin_buttons, {{
+                                text = p.title .. " ▸",
+                                callback = function()
+                                    if plugin_picker then
+                                        UIManager:close(plugin_picker)
+                                        plugin_picker = nil
+                                    end
+                                    showPluginSubMenu(p.key, p.title, sub, 1, {})
+                                end,
+                            }})
+                        elseif type(entry.callback) == "function" then
+                            table.insert(plugin_buttons, {{
+                                text = p.title,
+                                callback = function()
+                                    if plugin_picker then
+                                        UIManager:close(plugin_picker)
+                                        plugin_picker = nil
+                                    end
+                                    if choice_dialog then
+                                        UIManager:close(choice_dialog)
+                                        choice_dialog = nil
+                                    end
+                                    current_action_type = "plugin"
+                                    current_action_val1 = p.key
+                                    current_action_val2 = PluginScan.SENTINEL
+                                    current_action_title = p.title
+                                    current_view = "common"
+                                    buildSaveDialog(true)
+                                end,
+                            }})
+                        end
                     end
-                    plugin_buttons[#plugin_buttons + 1] = {{ text = _("Back"), callback = function()
-                        if plugin_picker then UIManager:close(plugin_picker); plugin_picker = nil end
-                        openActionPicker()
-                    end }}
-                    plugin_picker = ButtonDialog:new{ title = _("Select Plugin"), title_align = "center", buttons = plugin_buttons }
-                    UIManager:show(plugin_picker)
-                end }},
-                {{ text = _("System Action"), callback = function()
+                end
+            end
+        end
+        
+        -- Sort separately
+        table.sort(plugin_buttons, function(a, b)
+            return (a[1].text or ""):lower() < (b[1].text or ""):lower()
+        end)
+        table.sort(patch_buttons, function(a, b)
+            return (a[1].text or ""):lower() < (b[1].text or ""):lower()
+        end)
+        
+        -- Add plugins first, then patches
+        for _, btn in ipairs(plugin_buttons) do
+            table.insert(buttons, btn)
+        end
+        
+        -- Add separator between plugins and patches
+        if #plugin_buttons > 0 and #patch_buttons > 0 then
+            table.insert(buttons, {{
+                text = "──────────────────",
+                enabled = false,
+            }})
+        end
+        
+        for _, btn in ipairs(patch_buttons) do
+            table.insert(buttons, btn)
+        end
+        
+        if #buttons == 0 then
+            table.insert(buttons, {{
+                text = _("No available plugin actions"),
+                enabled = false,
+            }})
+        end
+        
+        table.insert(buttons, {{
+            text = _("Back"),
+            callback = function()
+                if plugin_picker then
+                    UIManager:close(plugin_picker)
+                    plugin_picker = nil
+                end
+                openActionPicker()
+            end
+        }})
+        
+        plugin_picker = ButtonDialog:new{
+            title = _("Select plugin or patch"),
+            title_align = "center",
+            buttons = buttons,
+            width = math.floor(Screen:getWidth() * 0.7),
+            max_height = math.floor(Screen:getHeight() * 0.7),
+        }
+        UIManager:show(plugin_picker)
+    end
+    
+    showPluginList()
+end }},
+                {{ text = _("System action"), callback = function()
                     openDispatcherPicker()
                 end }},
-                {{ text = _("Record Menu Action"), callback = function()
+                {{ text = _("Record menu action"), callback = function()
                     UIManager:close(choice_dialog)
                     choice_dialog = nil
                     local FM = require("apps/filemanager/filemanager")
@@ -5386,7 +5865,6 @@ function showCustomQADialog(qa_id, on_done)
             { description = _("Name"), text = existing_label, hint = _("Action name…") },
         }
 
-        -- Get current position
         local function getCurrentPosition()
             if not qa_id then return nil, 0 end
             local slots = getQASlots()
@@ -5400,7 +5878,6 @@ function showCustomQADialog(qa_id, on_done)
 
         local pos, total = getCurrentPosition()
 
-        -- Build last row
         local last_row = {
             { text = _("Cancel"), callback = function()
                 UIManager:close(active_dialog)
@@ -5411,7 +5888,6 @@ function showCustomQADialog(qa_id, on_done)
             end },
         }
 
-        -- Delete: only for custom actions (qa_id exists)
         if qa_id then
             table.insert(last_row, { text = _("Delete"), callback = function()
                 if active_dialog then
@@ -5442,7 +5918,6 @@ function showCustomQADialog(qa_id, on_done)
             end })
         end
 
-        -- Move left
         if pos then
             table.insert(last_row, { text = "◀", enabled = (pos > 1), callback = function()
                 if active_dialog then
@@ -5469,7 +5944,6 @@ function showCustomQADialog(qa_id, on_done)
             end })
         end
 
-        -- Position button
         if pos then
             table.insert(last_row, { text = pos .. "/" .. total, callback = function()
                 UIManager:close(active_dialog)
@@ -5480,7 +5954,7 @@ function showCustomQADialog(qa_id, on_done)
                     sort_items[#sort_items + 1] = { text = getLabelForAction(id), orig_item = id }
                 end
                 local sort_dialog = SortWidget:new{
-                    title = _("Arrange Buttons"),
+                    title = _("Reorder buttons"),
                     item_table = sort_items,
                     covers_fullscreen = true,
                     callback = function()
@@ -5496,7 +5970,6 @@ function showCustomQADialog(qa_id, on_done)
             end })
         end
 
-        -- Move right
         if pos then
             table.insert(last_row, { text = "▶", enabled = (pos < total), callback = function()
                 if active_dialog then
@@ -5523,7 +5996,6 @@ function showCustomQADialog(qa_id, on_done)
             end })
         end
 
-        -- Remove
         table.insert(last_row, { text = _("Remove"), callback = function()
             if active_dialog then
                 local inputs = active_dialog:getFields()
@@ -5569,8 +6041,14 @@ function showCustomQADialog(qa_id, on_done)
             elseif current_action_type == "collection" then
                 collection = current_action_val1
             elseif current_action_type == "plugin" then
-                plugin_key = current_action_val1
-                plugin_method = current_action_val2
+    plugin_key = current_action_val1
+    -- If it's a submenu (table), pass via dispatcher_value
+    if type(current_action_val2) == "table" and current_action_val2.type == "submenu" then
+        dispatcher_value = current_action_val2
+        plugin_method = nil
+    else
+        plugin_method = current_action_val2
+    end
             elseif current_action_type == "dispatcher" then
                 dispatcher_action = current_action_val1
                 dispatcher_value = current_action_val2
@@ -5622,7 +6100,7 @@ function showCustomQADialog(qa_id, on_done)
                     end,
                 }})
                 view_dialog = ButtonDialog:new{
-                    title = _("Select context"),
+                    title = _("Select Context"),
                     title_align = "center",
                     buttons = view_buttons,
                 }
@@ -5647,59 +6125,46 @@ function showCustomQADialog(qa_id, on_done)
         pcall(function() active_dialog:onShowKeyboard() end)
     end
 
-    -- Define openDispatcherPicker
     openDispatcherPicker = function(touch_menu)
-        if choice_dialog then
-            UIManager:close(choice_dialog)
-            choice_dialog = nil
-        end
+    if choice_dialog then
+        UIManager:close(choice_dialog)
+        choice_dialog = nil
+    end
 
-        local actions = getDispatcherActions()
-        if #actions == 0 then
-            UIManager:show(InfoMessage:new{ text = _("No system actions available"), timeout = 3 })
-            cancelActionPicker()
-            return
-        end
+    local actions = getDispatcherActions()
+    if #actions == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No system actions available"), timeout = 3 })
+        cancelActionPicker()
+        return
+    end
 
+    local sections = {
+        { key = "general",     title = _("General") },
+        { key = "device",      title = _("Device") },
+        { key = "screen",      title = _("Screen & Light") },
+        { key = "filemanager", title = _("File Browser") },
+        { key = "reader",      title = _("Reader") },
+        { key = "rolling",     title = _("Re-flowable (epub, fb2, txt…)") },
+        { key = "paging",      title = _("Fixed layout (pdf, djvu, images…)") },
+    }
+
+    local sections_map = {}
+    for __, sec in ipairs(sections) do
+        sections_map[sec.key] = { title = sec.title, items = {} }
+    end
+
+    for __, action in ipairs(actions) do
         local ok, DispatcherMod = pcall(require, "dispatcher")
-        if not ok or not DispatcherMod then
-            UIManager:show(InfoMessage:new{ text = _("Unable to load Dispatcher"), timeout = 3 })
-            cancelActionPicker()
-            return
-        end
-
-        local settingsList
-        local fn_idx = 1
-        while true do
-            local name, val = debug.getupvalue(DispatcherMod.registerAction, fn_idx)
-            if not name then break end
-            if name == "settingsList" then settingsList = val end
-            fn_idx = fn_idx + 1
-        end
-
-        if not settingsList then
-            UIManager:show(InfoMessage:new{ text = _("Unable to get system action list"), timeout = 3 })
-            cancelActionPicker()
-            return
-        end
-
-        local sections = {
-            { key = "general",     title = _("General") },
-            { key = "device",      title = _("Device") },
-            { key = "screen",      title = _("Screen & Lighting") },
-            { key = "filemanager", title = _("File Manager") },
-            { key = "reader",      title = _("Reader") },
-            { key = "rolling",     title = _("Re-flowable documents (epub, fb2, txt…)") },
-            { key = "paging",      title = _("Fixed-layout documents (pdf, djvu, images…)") },
-        }
-
-        local sections_map = {}
-        for __, sec in ipairs(sections) do
-            sections_map[sec.key] = { title = sec.title, items = {} }
-        end
-
-        for __, action in ipairs(actions) do
-            local def = settingsList[action.id]
+        if ok and DispatcherMod then
+            local settingsList
+            local fn_idx = 1
+            while true do
+                local name, val = debug.getupvalue(DispatcherMod.registerAction, fn_idx)
+                if not name then break end
+                if name == "settingsList" then settingsList = val end
+                fn_idx = fn_idx + 1
+            end
+            local def = settingsList and settingsList[action.id]
             if def and def.category then
                 local section_key = "general"
                 for ___, sec in ipairs(sections) do
@@ -5716,213 +6181,212 @@ function showCustomQADialog(qa_id, on_done)
                 })
             end
         end
+    end
 
-        local section_buttons = {}
+    local section_buttons = {}
 
-        for __, sec in ipairs(sections) do
-            local items = sections_map[sec.key].items
-            if #items > 0 then
-                table.sort(items, function(a, b) return a.title:lower() < b.title:lower() end)
+    for __, sec in ipairs(sections) do
+        local items = sections_map[sec.key].items
+        if #items > 0 then
+            table.sort(items, function(a, b) return a.title:lower() < b.title:lower() end)
 
-                local action_buttons = {}
+            local action_buttons = {}
 
-                table.insert(action_buttons, {{
-                    text = "⚙️ " .. _("Open main menu"),
-                    callback = function()
-                        if sub_dialog then
-                            UIManager:close(sub_dialog)
-                            sub_dialog = nil
-                        end
-                        if disp_picker then
-                            UIManager:close(disp_picker)
-                            disp_picker = nil
-                        end
-                        closeSettingsDialog()
-                        showSettingsMenu(touch_menu)
+            table.insert(action_buttons, {{
+                text = "⚙️ " .. _("Open main menu"),
+                callback = function()
+                    if sub_dialog then
+                        UIManager:close(sub_dialog)
+                        sub_dialog = nil
                     end
-                }})
-
-                table.insert(action_buttons, {{
-                    text = "◂◂ " .. _("Back to edit dialog"),
-                    callback = function()
-                        if sub_dialog then
-                            UIManager:close(sub_dialog)
-                            sub_dialog = nil
-                        end
-                        if disp_picker then
-                            UIManager:close(disp_picker)
-                            disp_picker = nil
-                        end
-                        buildSaveDialog(false)
+                    if disp_picker then
+                        UIManager:close(disp_picker)
+                        disp_picker = nil
                     end
-                }})
-
-                table.insert(action_buttons, {{
-                    text = "◂ " .. _("Back"),
-                    callback = function()
-                        if sub_dialog then
-                            UIManager:close(sub_dialog)
-                            sub_dialog = nil
-                        end
-                        openDispatcherPicker(touch_menu)
-                    end
-                }})
-
-                table.insert(action_buttons, {})
-
-                for ___, item in ipairs(items) do
-                    local _item = item
-                    local category = item.category
-                    local def = item.def
-
-                    if category == "none" or category == "arg" then
-                        table.insert(action_buttons, {{
-                            text = item.title,
-                            callback = function()
-                                disp_picker, sub_dialog, choice_dialog = closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
-                                current_action_type = "dispatcher"
-                                current_action_val1 = _item.id
-                                current_action_val2 = true
-                                current_action_title = _item.title
-                                if def and def.filemanager then
-                                    current_view = "filemanager"
-                                elseif def and (def.reader or def.rolling or def.paging) then
-                                    current_view = "reader"
-                                else
-                                    current_view = "common"
-                                end
-                                buildSaveDialog(true)
-                            end,
-                        }})
-                    elseif category == "absolutenumber" or category == "incrementalnumber" then
-                        table.insert(action_buttons, {{
-                            text = item.title,
-                            callback = function()
-                                if sub_dialog then UIManager:close(sub_dialog); sub_dialog = nil end
-                                local spin = SpinWidget:new{
-                                    title_text = _item.title,
-                                    value = def.default or def.min or 0,
-                                    value_min = def.min or 0,
-                                    value_max = def.max or 100,
-                                    value_step = def.step or 1,
-                                    unit = def.unit,
-                                    callback = function(spin)
-                                        disp_picker, sub_dialog, choice_dialog = closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
-                                        current_action_type = "dispatcher"
-                                        current_action_val1 = _item.id
-                                        current_action_val2 = spin.value
-                                        current_action_title = _item.title .. ": " .. tostring(spin.value)
-                                        if def and def.filemanager then
-                                            current_view = "filemanager"
-                                        elseif def and (def.reader or def.rolling or def.paging) then
-                                            current_view = "reader"
-                                        else
-                                            current_view = "common"
-                                        end
-                                        buildSaveDialog(true)
-                                    end,
-                                }
-                                UIManager:show(spin)
-                            end,
-                        }})
-elseif category == "string" or category == "configurable" then
-    table.insert(action_buttons, {{
-        text = item.title,
-        callback = buildConfigurableSubItems(
-            _item, def, touch_menu, 
-            buildSaveDialog, openDispatcherPicker, closeSettingsDialog, showSettingsMenu,
-            -- Pass getters/setters
-            function() return current_action_type end,
-            function() return current_action_val1 end,
-            function() return current_action_val2 end,
-            function() return current_action_title end,
-            function() return current_view end,
-            function(v) current_action_type = v end,
-            function(v) current_action_val1 = v end,
-            function(v) current_action_val2 = v end,
-            function(v) current_action_title = v end,
-            function(v) current_view = v end
-              )
-    }})
-end
+                    closeSettingsDialog()
+                    showSettingsMenu(touch_menu)
                 end
+            }})
 
-                -- Handle section_buttons
-                if #action_buttons > 4 then
-                    table.insert(section_buttons, {{
-                        text = sec.title,
+            table.insert(action_buttons, {{
+                text = "◂◂ " .. _("Back to editor"),
+                callback = function()
+                    if sub_dialog then
+                        UIManager:close(sub_dialog)
+                        sub_dialog = nil
+                    end
+                    if disp_picker then
+                        UIManager:close(disp_picker)
+                        disp_picker = nil
+                    end
+                    buildSaveDialog(false)
+                end
+            }})
+
+            table.insert(action_buttons, {{
+                text = "◂ " .. _("Back"),
+                callback = function()
+                    if sub_dialog then
+                        UIManager:close(sub_dialog)
+                        sub_dialog = nil
+                    end
+                    openDispatcherPicker(touch_menu)
+                end
+            }})
+
+            table.insert(action_buttons, {})
+
+            for ___, item in ipairs(items) do
+                local _item = item
+                local category = item.category
+                local def = item.def
+
+                if category == "none" or category == "arg" then
+                    table.insert(action_buttons, {{
+                        text = item.title,
                         callback = function()
-                            if disp_picker then
-                                UIManager:close(disp_picker)
-                                disp_picker = nil
+                            disp_picker, sub_dialog, choice_dialog = closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
+                            current_action_type = "dispatcher"
+                            current_action_val1 = _item.id
+                            current_action_val2 = true
+                            current_action_title = _item.title
+                            if def and def.filemanager then
+                                current_view = "filemanager"
+                            elseif def and (def.reader or def.rolling or def.paging) then
+                                current_view = "reader"
+                            else
+                                current_view = "common"
                             end
-                           sub_dialog = ButtonDialog:new{
-                                title = sec.title,
-                                title_align = "center",
-                                buttons = action_buttons,
-                                width = math.floor(Screen:getWidth() * 0.7),
-                            }
-                            UIManager:show(sub_dialog)
+                            buildSaveDialog(true)
                         end,
                     }})
-                else
-                    for _, btn in ipairs(action_buttons) do
-                        table.insert(section_buttons, btn)
-                    end
+                elseif category == "absolutenumber" or category == "incrementalnumber" then
+                    table.insert(action_buttons, {{
+                        text = item.title,
+                        callback = function()
+                            if sub_dialog then UIManager:close(sub_dialog); sub_dialog = nil end
+                            local spin = SpinWidget:new{
+                                title_text = _item.title,
+                                value = def.default or def.min or 0,
+                                value_min = def.min or 0,
+                                value_max = def.max or 100,
+                                value_step = def.step or 1,
+                                unit = def.unit,
+                                callback = function(spin)
+                                    disp_picker, sub_dialog, choice_dialog = closeDispatcherDialogs(disp_picker, sub_dialog, choice_dialog)
+                                    current_action_type = "dispatcher"
+                                    current_action_val1 = _item.id
+                                    current_action_val2 = spin.value
+                                    current_action_title = _item.title .. ": " .. tostring(spin.value)
+                                    if def and def.filemanager then
+                                        current_view = "filemanager"
+                                    elseif def and (def.reader or def.rolling or def.paging) then
+                                        current_view = "reader"
+                                    else
+                                        current_view = "common"
+                                    end
+                                    buildSaveDialog(true)
+                                end,
+                            }
+                            UIManager:show(spin)
+                        end,
+                    }})
+                elseif category == "string" or category == "configurable" then
+                    table.insert(action_buttons, {{
+                        text = item.title,
+                        callback = buildConfigurableSubItems(
+                            _item, def, touch_menu, 
+                            buildSaveDialog, openDispatcherPicker, closeSettingsDialog, showSettingsMenu,
+                            function() return current_action_type end,
+                            function() return current_action_val1 end,
+                            function() return current_action_val2 end,
+                            function() return current_action_title end,
+                            function() return current_view end,
+                            function(v) current_action_type = v end,
+                            function(v) current_action_val1 = v end,
+                            function(v) current_action_val2 = v end,
+                            function(v) current_action_title = v end,
+                            function(v) current_view = v end
+                        )
+                    }})
+                end
+            end
+
+            if #action_buttons > 4 then
+                table.insert(section_buttons, {{
+                    text = sec.title,
+                    callback = function()
+                        if disp_picker then
+                            UIManager:close(disp_picker)
+                            disp_picker = nil
+                        end
+                        sub_dialog = ButtonDialog:new{
+                            title = sec.title,
+                            title_align = "center",
+                            buttons = action_buttons,
+                            width = math.floor(Screen:getWidth() * 0.7),
+                        }
+                        UIManager:show(sub_dialog)
+                    end,
+                }})
+            else
+                for _, btn in ipairs(action_buttons) do
+                    table.insert(section_buttons, btn)
                 end
             end
         end
-
-        local final_buttons = {}
-
-        table.insert(final_buttons, {{
-            text = "⚙️ " .. _("Open main menu"),
-            callback = function()
-                if disp_picker then
-                    UIManager:close(disp_picker)
-                    disp_picker = nil
-                end
-                closeSettingsDialog()
-                showSettingsMenu(touch_menu)
-            end
-        }})
-
-        table.insert(final_buttons, {{
-            text = "◂◂ " .. _("Back to edit dialog"),
-            callback = function()
-                if disp_picker then
-                    UIManager:close(disp_picker)
-                    disp_picker = nil
-                end
-                buildSaveDialog(false)
-            end
-        }})
-
-        table.insert(final_buttons, {{
-            text = "◂ " .. _("Back"),
-            callback = function()
-                if disp_picker then
-                    UIManager:close(disp_picker)
-                    disp_picker = nil
-                end
-                openActionPicker()
-            end
-        }})
-
-        table.insert(final_buttons, {})
-
-        for __, btn in ipairs(section_buttons) do
-            table.insert(final_buttons, btn)
-        end
-
-        disp_picker = ButtonDialog:new{
-            title = _("System Actions"),
-            title_align = "center",
-            buttons = final_buttons,
-            width = math.floor(Screen:getWidth() * 0.7),
-        }
-        UIManager:show(disp_picker)
     end
+
+    local final_buttons = {}
+
+    table.insert(final_buttons, {{
+        text = "⚙️ " .. _("Open main menu"),
+        callback = function()
+            if disp_picker then
+                UIManager:close(disp_picker)
+                disp_picker = nil
+            end
+            closeSettingsDialog()
+            showSettingsMenu(touch_menu)
+        end
+    }})
+
+    table.insert(final_buttons, {{
+        text = "◂◂ " .. _("Back to editor"),
+        callback = function()
+            if disp_picker then
+                UIManager:close(disp_picker)
+                disp_picker = nil
+            end
+            buildSaveDialog(false)
+        end
+    }})
+
+    table.insert(final_buttons, {{
+        text = "◂ " .. _("Back"),
+        callback = function()
+            if disp_picker then
+                UIManager:close(disp_picker)
+                disp_picker = nil
+            end
+            openActionPicker()
+        end
+    }})
+
+    table.insert(final_buttons, {})
+
+    for __, btn in ipairs(section_buttons) do
+        table.insert(final_buttons, btn)
+    end
+
+    disp_picker = ButtonDialog:new{
+        title = _("System actions"),
+        title_align = "center",
+        buttons = final_buttons,
+        width = math.floor(Screen:getWidth() * 0.7),
+    }
+    UIManager:show(disp_picker)
+end
 
     if not qa_id then
         buildSaveDialog(false)
@@ -5936,7 +6400,6 @@ end
 -- ============================================================
 
 local function resetAllSettings(touch_menu)
-    -- Clear all caches
     picker_cache = {}
     cached_file_icons = nil
     system_temp_overrides = nil
@@ -5956,7 +6419,7 @@ local function resetAllSettings(touch_menu)
     if f then
         f:write("return " .. serializeTable(new_config))
         f:close()
-        logger.info("[QuickActions] Config file rewritten:", CONFIG_PATH)
+        logger.info("[QuickActions] Configuration file rewritten:", CONFIG_PATH)
     end
     CONFIG_DATA = new_config
     local current_menu = nil
@@ -5973,7 +6436,7 @@ local function resetAllSettings(touch_menu)
     if current_menu and current_menu.updateItems then
         current_menu:updateItems()
     end
-    logger.info("[QuickActions] Configuration reset to default")
+    logger.info("[QuickActions] Configuration reset to default values")
 end
 
 -- ============================================================
@@ -6107,7 +6570,7 @@ local root_menu_items = {
                        local filename = filename_with_ext:gsub("%.[^%.]+$", "")
                        setString("qa_tab_icon", filename)
                        UIManager:show(ConfirmBox:new{
-                           text = _("Restart KOReader required to take effect. Restart now?"),
+                           text = _("Restart KOReader to take effect. Restart now?"),
                            ok_text = _("Restart"),
                            cancel_text = _("Later"),
                            ok_callback = function()
@@ -6116,8 +6579,8 @@ local root_menu_items = {
                        })
                    end
                end,
-               nil,  -- saved_icon
-               "file"  -- Only show file icons
+               nil,
+               "file"
            )
        end,
     },
@@ -6151,7 +6614,7 @@ local root_menu_items = {
         text = _("Edit buttons"),
         sub_item_table = {
             {
-                text = _("Arrange buttons") .. " ▸",
+                text = _("Reorder buttons") .. " ▸",
                 close_on_click = true, 
                 callback = function()
                     closeSettingsDialog()
@@ -6162,7 +6625,7 @@ local root_menu_items = {
                         sort_items[#sort_items + 1] = { text = getLabelForAction(id), orig_item = id }
                     end
                     local sort_dialog = SortWidget:new{
-                        title = _("Arrange Buttons"),
+                        title = _("Reorder buttons"),
                         item_table = sort_items,
                         covers_fullscreen = true,
                         callback = function()
@@ -6178,7 +6641,7 @@ local root_menu_items = {
                 end,
             },
             {
-                text = _("Add button") .. " ▸",
+                text = _("Add buttons") .. " ▸",
                 close_on_click = true,
                 callback = function()
                     closeSettingsDialog()
@@ -6243,18 +6706,18 @@ local root_menu_items = {
         },
     },
     {
-        text = function() return (buttonHoldEdit() and "✓ " or "  ") .. _("Long-press button to open edit dialog") end,
+        text = function() return (buttonHoldEdit() and "✓ " or "  ") .. _("Long-press button to open editor") end,
         callback = function() 
             setBool("qa_button_hold_edit", not buttonHoldEdit())
             refreshQuickPanel(touch_menu)
         end,
     },
     {
-        text = function() return (settingsOnHold() and "✓ " or "  ") .. _("Long-press tab to open settings") end,
+        text = function() return (settingsOnHold() and "✓ " or "  ") .. _("Long-press tab panel to open settings") end,
         callback = function() setBool("qa_settings_on_hold", not settingsOnHold()) end,
     },
     {
-        text = _("Save current settings as default"),
+        text = _("Save current as default"),
         close_on_click = true,
         callback = function()
             local json = require("json")
@@ -6283,19 +6746,19 @@ local root_menu_items = {
             }
             setSetting("default_config", default_config)
             UIManager:show(Notification:new{
-                text = _("Current settings saved as default"),
+                text = _("Current configuration saved as default"),
                 timeout = 2,
             })
         end,
     },
     {
-        text = _("Apply default settings"),
+        text = _("Apply default configuration"),
         close_on_click = true,
         callback = function()
             local default_config = getSetting("default_config")
             if not default_config or type(default_config) ~= "table" then
                 UIManager:show(Notification:new{
-                    text = _("No default config saved. Please save first."),
+                    text = _("No default configuration saved, please save first"),
                     timeout = 2,
                 })
                 return
@@ -6321,15 +6784,13 @@ local root_menu_items = {
             setBool("qa_filter_initialized", default_config.qa_filter_initialized)
             setTable("qa_icon_overrides", default_config.qa_icon_overrides or {})
             setTable("ui_font_overrides", default_config.ui_font_overrides or {}) 
-            -- Clear caches
             picker_cache = {}
             cached_file_icons = nil
             system_temp_overrides = nil
-            -- Apply fonts
             applyUIFontChanges()
             refreshQuickPanel(touch_menu)
             UIManager:show(Notification:new{
-                text = _("Default settings applied"),
+                text = _("Default configuration applied"),
                 timeout = 2,
             })
         end,
@@ -6340,7 +6801,7 @@ local root_menu_items = {
         callback = function()
             closeSettingsDialog()
             local confirm = ConfirmBox:new{
-                text = _("Reset all settings to initial defaults?\nThis will clear all custom actions and your saved default config."),
+                text = _("Reset all settings to initial defaults?\nThis will clear all custom actions and your saved default configuration."),
                 ok_text = _("Reset"),
                 cancel_text = _("Cancel"),
                 ok_callback = function()
@@ -6362,7 +6823,7 @@ local root_menu_items = {
             local InfoMessage = require("ui/widget/infomessage")
             UIManager:show(InfoMessage:new{
                 text = "quickactions - Quick Actions\n\n" ..
-                       "Project URL:\n" ..
+                       "Project page:\n" ..
                        "GitHub: https://github.com/gytwo/kopatches\n" ..
                        "Gitee: https://gitee.com/gytwo/kopatches",
                 timeout = 10,
@@ -6370,7 +6831,7 @@ local root_menu_items = {
         end,
     },
 }
-    showMenu(root_menu_items, _("Quick Actions Settings"), nil, touch_menu, root_menu_items)
+    showMenu(root_menu_items, _("Quick Action Settings"), nil, touch_menu, root_menu_items)
 end
 
 -- ============================================================
@@ -6893,7 +7354,6 @@ function TouchMenu:updateItems(target_page, target_item_id)
         self._qs_refs = nil
         return _orig_updateItems(self, target_page, target_item_id)
     end
-    -- Fix: set page and page_num to prevent onNextPage errors
     self.page = 1
     self.page_num = 1
     
@@ -7027,7 +7487,7 @@ function TouchMenu:onPan(arg, ges_ev)
 end
 
 -- ============================================================
--- Prioritize quick actions panel display
+-- Prioritize quick action panel
 -- ============================================================
 
 local function patchFileManagerMenuClose()
@@ -7064,7 +7524,7 @@ end
 -- ============================================================
 
 local QS_PANEL_TAB = {
-    icon = getString("qa_tab_icon"),   -- "quickactions"
+    icon = getString("qa_tab_icon"),
     remember = false,
     _qs_panel = true,
 }
@@ -7099,7 +7559,7 @@ local function patchFileManagerMenu()
             m_self.menu_items = {}
         end
         m_self.menu_items.qa_settings = {
-            text = _("Quick Actions Settings"),
+            text = _("Quick Action Settings"),
             callback = function()
                 showSettingsMenu()
             end,
@@ -7133,7 +7593,7 @@ local function patchReaderMenu()
             m_self.menu_items = {}
         end
         m_self.menu_items.qa_settings = {
-            text = _("Quick Actions Settings"),
+            text = _("Quick Action Settings"),
             callback = function()
                 showSettingsMenu()
             end,
@@ -7210,7 +7670,7 @@ local function registerGestures()
     Dispatcher:registerAction("qa_settings_action", {
         category = "none",
         event = "QuickActionsSettings",
-        title = _("QA: Quick Actions Settings"),
+        title = _("QA: Quick Action Settings"),
         general = true,
     })
 
@@ -7278,7 +7738,7 @@ end
 local function initDefaultDedicatedLists()
     if getBool("qa_filter_initialized") then return end
     setBool("qa_filter_initialized", true)
-    logger.info("[QuickActions] Initialized dedicated lists")
+    logger.info("[QuickActions] Default context lists initialized")
 end
 
 local function install()
