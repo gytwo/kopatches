@@ -1,3 +1,6 @@
+[![Release](https://github.com/gytwo/gitee-sync/actions/workflows/release.yml/badge.svg)](https://github.com/gytwo/gitee-sync/actions/workflows/release.yml)
+[![Sync from Gitee to GitHub](https://github.com/gytwo/gitee-sync/actions/workflows/gitee-sync.yml/badge.svg)](https://github.com/gytwo/gitee-sync/actions/workflows/gitee-sync.yml)
+
 # 目录
 - [quickactions 快捷操作面板](#快捷操作面板)
 - [fm-cover 封面视觉设置](#封面视觉设置)
